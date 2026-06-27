@@ -1,6 +1,6 @@
 {
   "name": "@rimenko-dev/aiguard",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Protect your projects from AI-tool secret leaks — catches .claude/, .cursor/, and hidden credentials before npm publish or git push",
   "keywords": [
     "security", "secrets", "claude-code", "cursor", "ai", "leak", "npm-publish", "api-key"

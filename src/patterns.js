@@ -144,6 +144,22 @@ const SECRET_PATTERNS = [
     name: 'Generic secret in env',
     regex: /(?:PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY|ACCESS_KEY|AUTH_KEY)\s*[=:]\s*["']?[^\s"']{8,}["']?/gi,
   },
+
+  // ── Base64-obfuscated secrets ──────────────────────────────────
+  // Catches secrets hidden as Base64 strings next to a key/token label.
+  // Decodes the candidate and checks if it matches any known secret prefix.
+  {
+    name: 'Base64-encoded secret',
+    regex: /(?:key|token|secret|password|credential)["']?\s*[=:]\s*["']?([A-Za-z0-9+/]{40,}={0,2})["']?/gi,
+    validate: (match) => {
+      try {
+        const b64 = match.match(/[A-Za-z0-9+/]{40,}={0,2}/)?.[0];
+        if (!b64) return false;
+        const decoded = Buffer.from(b64, 'base64').toString('utf8');
+        return /sk-ant-|sk-proj-|AKIA[0-9A-Z]|xai-|sk_live_|ghp_|ghs_|gho_|github_pat_|npm_|SG\.|xoxb-/.test(decoded);
+      } catch (_) { return false; }
+    },
+  },
 ];
 
 module.exports = { AI_FOLDERS, AI_SECRET_FILES, SECRET_PATTERNS };

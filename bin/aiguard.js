@@ -2,9 +2,11 @@
 'use strict';
 
 const path = require('path');
-const { scan } = require('../src/scanner');
+const { scan, scanGitHistory } = require('../src/scanner');
 
-const args = process.argv.slice(2);
+const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
+const flags = process.argv.slice(2).filter(a => a.startsWith('--'));
+const historyMode = flags.includes('--history');
 const projectRoot = args[0] ? path.resolve(args[0]) : process.cwd();
 
 // Refuse to scan home directory — it triggers macOS permission dialogs for
@@ -38,6 +40,13 @@ console.log(`Проект: ${projectRoot}\n`);
 let findings;
 try {
   findings = scan(projectRoot);
+  if (historyMode) {
+    console.log('🔍 Проверяю git-историю...\n');
+    const historyFindings = scanGitHistory(projectRoot);
+    if (historyFindings.length > 0) {
+      findings = findings.concat(historyFindings);
+    }
+  }
 } catch (err) {
   console.error('Ошибка сканирования:', err.message);
   process.exit(1);

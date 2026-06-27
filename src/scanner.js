@@ -194,13 +194,26 @@ function scan(projectRoot) {
         findings.push(...scanContent(secretFile, content, 'CRITICAL'));
       }
     } else {
-      // File exists locally but is excluded from publish — warn only
-      findings.push({
-        severity: 'WARN',
-        type: 'ai_secret_file_exists',
-        file: secretFile,
-        detail: 'Файл существует локально, но исключён из публикации. Убедись, что .npmignore актуален.',
-      });
+      // File exists locally but excluded — scan content anyway so the user
+      // knows which specific secrets are at risk if the ignore ever breaks.
+      const content = safeRead(full);
+      const secretsInside = content ? scanContent(secretFile, content, 'WARN') : [];
+      if (secretsInside.length > 0) {
+        findings.push({
+          severity: 'WARN',
+          type: 'ai_secret_file_exists',
+          file: secretFile,
+          detail: `Исключён из публикации, но содержит ${secretsInside.length} секрет(ов) — опасно если .npmignore сломается.`,
+        });
+        findings.push(...secretsInside);
+      } else {
+        findings.push({
+          severity: 'WARN',
+          type: 'ai_secret_file_exists',
+          file: secretFile,
+          detail: 'Файл существует локально, но исключён из публикации. Убедись, что .npmignore актуален.',
+        });
+      }
     }
   }
 
@@ -308,4 +321,61 @@ function isBinaryBuffer(buf) {
   return false;
 }
 
-module.exports = { scan };
+/**
+ * Scans git history for secrets that were ever committed.
+ * Extracts all "added" lines from every commit and runs secret patterns on them.
+ * Returns deduplicated findings tagged with the first commit SHA where the secret appeared.
+ */
+function scanGitHistory(projectRoot) {
+  const { execFileSync } = require('child_process');
+  const findings = [];
+
+  // Verify this is a git repository
+  try {
+    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: projectRoot, stdio: 'pipe' });
+  } catch (_) {
+    return [{ severity: 'WARN', type: 'no_git', file: '.', detail: 'Не гит-репозиторий — история не проверяется.' }];
+  }
+
+  // Get all added lines from all commits (additions only, no context)
+  // Split by commit so we can tag findings with the SHA
+  let logOutput;
+  try {
+    logOutput = execFileSync(
+      'git', ['log', '--all', '--no-color', '-U0', '--diff-filter=A', '--format=COMMIT:%H'],
+      { cwd: projectRoot, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 }
+    ).toString();
+  } catch (_) {
+    return [];
+  }
+
+  // Parse into {sha, addedLines} blocks
+  const blocks = [];
+  let current = null;
+  for (const line of logOutput.split('\n')) {
+    if (line.startsWith('COMMIT:')) {
+      current = { sha: line.slice(7, 15), lines: [] };
+      blocks.push(current);
+    } else if (current && line.startsWith('+') && !line.startsWith('+++')) {
+      current.lines.push(line.slice(1));
+    }
+  }
+
+  // Scan each commit block, deduplicate by (pattern + masked value)
+  const seen = new Set();
+  for (const { sha, lines } of blocks) {
+    if (!lines.length) continue;
+    const hits = scanContent(`git:коммит ${sha}`, lines.join('\n'), 'HIGH');
+    for (const hit of hits) {
+      const key = hit.detail;
+      if (!seen.has(key)) {
+        seen.add(key);
+        findings.push(hit);
+      }
+    }
+  }
+
+  return findings;
+}
+
+module.exports = { scan, scanGitHistory };
