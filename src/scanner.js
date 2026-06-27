@@ -50,23 +50,37 @@ function readIgnoreFile(filePath) {
     .filter(l => l && !l.startsWith('#'));
 }
 
-function getAllFiles(dir, ignoreList, base) {
-  base = base || dir;
+function getAllFiles(startDir, ignoreList, base) {
+  base = base || startDir;
   const results = [];
-  let entries;
-  try { entries = fs.readdirSync(dir); } catch (_) { return results; }
+  const visited = new Set();
+  // Итеративный обход — без рекурсии, не упирается в лимит стека
+  const queue = [startDir];
 
-  for (const entry of entries) {
-    const full = path.join(dir, entry);
-    const rel  = path.relative(base, full);
+  while (queue.length > 0) {
+    const dir = queue.pop();
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch (_) { continue; }
 
-    if (isIgnored(rel, entry, ignoreList)) continue;
+    for (const entry of entries) {
+      const full = path.join(dir, entry);
+      const rel  = path.relative(base, full);
 
-    const stat = fs.statSync(full);
-    if (stat.isDirectory()) {
-      results.push(...getAllFiles(full, ignoreList, base));
-    } else {
-      results.push(rel);
+      if (isIgnored(rel, entry, ignoreList)) continue;
+
+      let stat;
+      try { stat = fs.lstatSync(full); } catch (_) { continue; }
+      if (stat.isSymbolicLink()) continue;
+
+      if (stat.isDirectory()) {
+        let realPath;
+        try { realPath = fs.realpathSync(full); } catch (_) { continue; }
+        if (visited.has(realPath)) continue;
+        visited.add(realPath);
+        queue.push(full);
+      } else {
+        results.push(rel);
+      }
     }
   }
   return results;
