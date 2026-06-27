@@ -1,5 +1,7 @@
 'use strict';
 
+const { BIP39_WORDS } = require('./bip39');
+
 // AI-tool folders that often contain secrets
 const AI_FOLDERS = [
   '.claude',
@@ -97,13 +99,41 @@ const SECRET_PATTERNS = [
 
   // ── Crypto — #1 finding in our GitHub research (45 cases) ────
   {
-    name: 'Crypto mnemonic (12 words)',
-    // BIP39: exactly 12 lowercase English words separated by spaces
-    // Not anchored to line start — catches inline mnemonics too
-    regex: /\b(?:[a-z]{3,8}\s){11}[a-z]{3,8}\b(?=\s|$|[^a-z])/g,
+    name: 'Crypto mnemonic (BIP39 seed)',
+    // Matches 12 or 24 words in any case (lower, UPPER, Mixed).
+    // validate() normalises to lowercase and confirms via BIP39 dictionary.
+    // Without the dictionary check, any English sentence would match.
+    regex: /\b(?:[a-zA-Z]{3,8}[ \n]+){11,23}[a-zA-Z]{3,8}\b/g,
+    validate: (match) => {
+      try {
+        const words = match.trim().toLowerCase().split(/[ \n]+/);
+        if (words.length !== 12 && words.length !== 24) return false;
+        const inDict = words.filter((w) => BIP39_WORDS.has(w)).length;
+        return inDict / words.length >= 0.9;
+      } catch (_) { return false; }
+    },
   },
-  { name: 'Ethereum private key',     regex: /(?:0x)?[0-9a-fA-F]{64}(?=[^0-9a-fA-F]|$)/g },
-  { name: 'Bitcoin WIF private key',  regex: /[5KL][1-9A-HJ-NP-Za-km-z]{50,51}/g },
+  {
+    name: 'Crypto mnemonic (numbered BIP39 seed)',
+    // Matches numbered formats: "1. abandon 2. ability ... 12. zoo"
+    // or "1) abandon 2) ability..." — common in backup exports and screenshots.
+    regex: /1[.)]\s*[a-zA-Z]{3,8}(?:[ \t]*\d+[.)]\s*[a-zA-Z]{3,8}){11,23}/g,
+    validate: (match) => {
+      try {
+        const words = match.toLowerCase().replace(/\d+[.)]\s*/g, ' ').trim().split(/\s+/).filter(w => /^[a-z]+$/.test(w));
+        if (words.length !== 12 && words.length !== 24) return false;
+        const inDict = words.filter((w) => BIP39_WORDS.has(w)).length;
+        return inDict / words.length >= 0.9;
+      } catch (_) { return false; }
+    },
+  },
+  {
+    name: 'Ethereum private key',
+    // Only flag a 64-hex string when it sits next to a key/secret label —
+    // a bare 64-hex string is just as likely a SHA-256 hash or git object id.
+    regex: /(?:private[_\-]?key|privkey|secret[_\-]?key|eth[_\-]?key|wallet[_\-]?key)["']?\s*[=:]\s*["']?(?:0x)?[0-9a-fA-F]{64}\b/gi,
+  },
+  { name: 'Bitcoin WIF private key',  regex: /\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b/g },
 
   // ── Keys & certificates ───────────────────────────────────────
   { name: 'Private key block',        regex: /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/g },

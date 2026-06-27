@@ -7,6 +7,16 @@ const { scan } = require('../src/scanner');
 const args = process.argv.slice(2);
 const projectRoot = args[0] ? path.resolve(args[0]) : process.cwd();
 
+// Refuse to scan home directory — it triggers macOS permission dialogs for
+// every protected folder (Google Drive, Apple Music, etc.) and makes no sense
+// as a project root. The tool is designed for project directories only.
+const homeDir = require('os').homedir();
+if (projectRoot === homeDir) {
+  console.error('\n⛔  Запускать из домашней папки нельзя — укажи конкретный проект:');
+  console.error(`    aiguard ~/ClaudeCode/my-project\n`);
+  process.exit(1);
+}
+
 const ICONS = { CRITICAL: '🚨', HIGH: '⚠️ ', WARN: '💡' };
 const COLORS = {
   red:    '\x1b[31m',

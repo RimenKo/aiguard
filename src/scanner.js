@@ -86,24 +86,51 @@ function getAllFiles(startDir, ignoreList, base) {
   return results;
 }
 
+// Converts a gitignore/npmignore glob pattern to a RegExp.
+// Supports: * (within dir), ** (any depth), ? (single char), no {brace} expansion.
+function globToRegex(pattern) {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const regexStr = escaped
+    .replace(/\*\*/g, '.*')      // ** = any path including slashes
+    .replace(/\*/g,  '[^/]*')    // *  = any chars except slash
+    .replace(/\?/g,  '[^/]');    // ?  = one char except slash
+  return new RegExp('^' + regexStr + '$');
+}
+
 function isIgnored(rel, name, ignoreList) {
   return ignoreList.some(pattern => {
-    if (pattern.endsWith('/')) return rel.startsWith(pattern.slice(0, -1));
-    return name === pattern || rel === pattern || rel.startsWith(pattern + '/');
+    if (!pattern || pattern.startsWith('#') || pattern.startsWith('!')) return false;
+
+    const anchored  = pattern.startsWith('/');
+    const p         = anchored ? pattern.slice(1) : pattern;
+    const dirOnly   = p.endsWith('/');
+    const cleanPat  = dirOnly ? p.slice(0, -1) : p;
+
+    if (/[*?]/.test(cleanPat)) {
+      const re = globToRegex(cleanPat);
+      if (anchored) return re.test(rel) || re.test(rel.split('/')[0]);
+      // Non-anchored glob: match against basename OR full relative path
+      return re.test(name) || re.test(rel);
+    }
+
+    // Exact / prefix match
+    if (anchored) return rel === cleanPat || rel.startsWith(cleanPat + '/');
+    return name === cleanPat || rel === cleanPat || rel.startsWith(cleanPat + '/');
   });
 }
 
 function expandGlobs(patterns, root) {
-  const results = [];
+  const systemOnly = ['node_modules', '.git', '.DS_Store', 'coverage', 'dist', '.nyc_output'];
 
+  // If any entry is a glob, we can't resolve it without a glob library.
+  // Fall back to scanning the whole project — conservative but safe.
+  // Check ALL patterns first so we don't discard partially accumulated results.
+  if (patterns.some(p => /[*?{]/.test(p))) {
+    return getAllFiles(root, systemOnly, root);
+  }
+
+  const results = [];
   for (const pattern of patterns) {
-    if (/[*?{]/.test(pattern)) {
-      // Glob pattern — can't resolve without a glob library.
-      // When "files" has globs, npm ignores .npmignore — so we must NOT apply
-      // .npmignore either. Use only the hard system excludes to avoid false negatives.
-      const systemOnly = ['node_modules', '.git', '.DS_Store', 'coverage', 'dist', '.nyc_output'];
-      return getAllFiles(root, systemOnly, root);
-    }
     const full = path.join(root, pattern);
     if (fs.existsSync(full)) {
       const stat = fs.statSync(full);
@@ -234,15 +261,19 @@ function scan(projectRoot) {
 
 function scanContent(filePath, content, severity) {
   const results = [];
-  for (const { name, regex } of SECRET_PATTERNS) {
+  for (const { name, regex, validate } of SECRET_PATTERNS) {
     regex.lastIndex = 0;
-    const matches = content.match(regex);
-    if (matches) {
+    let m;
+    while ((m = regex.exec(content)) !== null) {
+      if (m[0].length === 0) { regex.lastIndex++; continue; }
+      if (validate) {
+        try { if (!validate(m[0])) continue; } catch (_) { continue; }
+      }
       results.push({
         severity,
         type: 'secret_pattern',
         file: filePath,
-        detail: `${name}: ${mask(matches[0])}`,
+        detail: `${name}: ${mask(m[0])}`,
       });
     }
   }
