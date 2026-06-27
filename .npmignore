@@ -1,0 +1,10 @@
+.claude
+.cursor
+.continue
+.aider
+.codeium
+.copilot-workspace
+.env
+.env.*
+*.local
+.npmignore.template

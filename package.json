@@ -1,0 +1,25 @@
+{
+  "name": "aiguard",
+  "version": "0.1.0",
+  "description": "Protect your projects from AI-tool secret leaks — catches .claude/, .cursor/, and hidden credentials before npm publish or git push",
+  "keywords": [
+    "security", "secrets", "claude-code", "cursor", "ai", "leak", "npm-publish", "api-key"
+  ],
+  "author": "RimenKo",
+  "license": "MIT",
+  "bin": {
+    "aiguard": "./bin/aiguard.js"
+  },
+  "scripts": {
+    "prepublishOnly": "node bin/aiguard.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "claude-hook/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}

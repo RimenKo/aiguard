@@ -1,0 +1,18 @@
+# AI tool folders — contain API keys and session data
+.claude
+.cursor
+.continue
+.aider
+.codeium
+
+# Environment files
+.env
+.env.*
+*.local
+*.local.*
+
+# Development only
+*.test.js
+*.spec.js
+coverage/
+.nyc_output/
