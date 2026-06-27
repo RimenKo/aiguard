@@ -31,7 +31,7 @@ We scanned 50,000 public GitHub repositories for AI tool artifacts. Results:
 | SSH private keys | 4 |
 
 **The #1 leak vector: `CLAUDE.md`.**
-Developers paste credentials into Claude Code's context file (CLAUDE.md) so the AI can reference them — then commit it to a public repo. We found over 63 `CLAUDE.md` variants containing live secrets.
+Developers paste credentials into Claude Code's context file so the AI can reference them — then commit it to a public repo. We found over 63 `CLAUDE.md` variants containing live secrets.
 
 **45 crypto seed phrases** were exposed in project files. That's 45 wallets — potentially drained.
 
@@ -49,6 +49,9 @@ Your AI assistant stores credentials in hidden folders:
 | Aider | `.aider/` | Model API keys, git credentials |
 | Continue | `.continue/` | LLM provider keys, embeddings tokens |
 | Codeium | `.codeium/` | Authentication tokens |
+| GitHub Copilot | `.github/copilot/` | Auth tokens |
+| Trae | `.trae/` | Session credentials |
+| Roo | `.roo/`, `.roo-cline/` | Model keys |
 
 These folders are **not excluded by default** from `npm publish` or `git push`. One missing `.npmignore` line, or a `CLAUDE.md` with a seed phrase committed to a public repo, and secrets are exposed — forever cached by GitHub.
 
@@ -56,37 +59,53 @@ These folders are **not excluded by default** from `npm publish` or `git push`. 
 
 ## What it catches
 
-**AI tool folders in your publish** — `.claude/`, `.cursor/`, `.windsurf/`, etc. included in npm tarball or git commit.
+### AI tool folders in your publish
+`.claude/`, `.cursor/`, `.windsurf/`, and 9 more — if any are included in your npm tarball or git commit, publish is blocked.
 
-**Known AI context files with secrets** — `CLAUDE.md`, `mcp.json`, `settings.local.json`.
+### Known AI context files with secrets
+`CLAUDE.md`, `mcp.json`, `settings.local.json` — scanned and blocked if published. Even when excluded from publish, `aiguard` shows you **which specific secrets** are inside, so you know the blast radius if your ignore config ever breaks.
 
-**Secrets in published files** — 55+ patterns across every major provider:
+### Secrets in published files — 55+ patterns
 
 | Category | Services |
 |----------|----------|
-| AI providers | Anthropic, OpenAI, xAI/Grok, Gemini, Groq, HuggingFace, Replicate, Mistral |
+| AI providers | Anthropic, OpenAI, xAI/Grok, Gemini, Groq, HuggingFace, Replicate, Mistral, Together AI |
 | Cloud | AWS, GCP service accounts, Azure, DigitalOcean, Cloudflare |
-| Source control | GitHub (classic / OAuth / Actions / fine-grained PAT), GitLab |
+| Source control | GitHub (classic / OAuth / Actions / fine-grained PAT), GitLab, npm tokens |
 | Payments | Stripe, PayPal, Braintree |
 | Messaging | Slack, Discord, Telegram bots, Twilio |
 | Email | SendGrid, Mailgun, Resend, Postmark |
 | Databases | PostgreSQL, MySQL, MongoDB, Redis, Supabase, PlanetScale, Neon, Pinecone |
-| Hosting | Vercel, Netlify, Heroku, Railway, Fly.io, npm tokens |
+| Hosting | Vercel, Netlify, Heroku, Railway, Fly.io |
 | Monitoring | Sentry, Datadog |
-| **Crypto** | **BIP39 12-word mnemonics, Ethereum private keys, Bitcoin WIF keys** |
+| **Crypto** | **BIP39 12/24-word mnemonics (any format), Ethereum private keys, Bitcoin WIF** |
 | Keys | RSA / EC / SSH private keys, JWT secrets |
+| **Base64** | **Encoded secrets — decoded and matched against known prefixes** |
 | Catch-all | Any `PASSWORD=`, `SECRET=`, `API_KEY=`, `TOKEN=` longer than 8 chars |
+
+### Git history scan
+Catches secrets that were committed in the past — even if they were deleted later. GitHub caches all commits forever.
+
+```bash
+aiguard --history
+```
 
 ---
 
 ## Usage
 
 ```bash
-# Scan current directory
+# Scan current directory (blocks npm publish / git push)
 aiguard
 
 # Scan a specific project
 aiguard /path/to/project
+
+# Scan git history for past leaks
+aiguard --history
+
+# Combine both
+aiguard /path/to/project --history
 ```
 
 **Exit codes:**
@@ -100,14 +119,20 @@ aiguard — AI secret leak scanner
 Project: /my-package
 
 🚨 CRITICAL — publish blocked (1):
-   .claude/settings.local.json
+   CLAUDE.md
    This file contains API keys and tokens — it will be included in your npm package!
 
-⚠️  HIGH RISK — publish blocked (1):
+⚠️  HIGH RISK — publish blocked (2):
    CLAUDE.md
-   Crypto mnemonic (12 words): abandon abandon ***...*** 
+   Anthropic API key: sk-ant-***...agAA
+   CLAUDE.md
+   Crypto mnemonic (BIP39 seed): abandon ability ***...*** 
 
-❌ Publish blocked: 1 critical + 1 high findings.
+💡 WARNINGS (1):
+   .env
+   Excluded from publish but contains 2 secrets: AWS Access Key ID, Generic secret in env
+
+❌ Publish blocked: 1 critical + 2 high findings.
 Add to .npmignore:
   .claude
   .cursor
@@ -131,11 +156,13 @@ Add to your `package.json` to block every `npm publish` automatically:
 
 ---
 
-## Use as a Claude Code hook
+## Use as a global Claude Code hook
 
-Runs before every Bash command inside Claude Code — catches secrets before they land in committed files.
+**Install once, protect all projects automatically.**
 
-Add to `.claude/settings.json`:
+Runs before every `git commit`, `git push`, and `npm publish` in any Claude Code session — no per-project setup needed.
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -146,7 +173,8 @@ Add to `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "npx @rimenko-dev/aiguard"
+            "command": "bash \"$HOME/.claude/bin/aiguard-guard.sh\"",
+            "timeout": 15
           }
         ]
       }
@@ -155,10 +183,40 @@ Add to `.claude/settings.json`:
 }
 ```
 
-Or copy the included config:
+Save this as `~/.claude/bin/aiguard-guard.sh` (chmod +x):
 
 ```bash
-cp node_modules/@rimenko-dev/aiguard/claude-hook/settings.json .claude/settings.json
+#!/bin/bash
+CMD=$(python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(data.get('command', ''))
+except:
+    pass
+" 2>/dev/null)
+
+if ! echo "$CMD" | grep -qE '^\s*(git\s+(push|commit|tag)\b|npm\s+publish\b)'; then
+    exit 0
+fi
+
+if command -v aiguard &>/dev/null; then
+    aiguard "$(pwd)" 2>&1
+    exit $?
+else
+    npx --yes @rimenko-dev/aiguard "$(pwd)" 2>&1
+    exit $?
+fi
+```
+
+---
+
+## Use as a pre-commit hook (git)
+
+```bash
+# In your project root:
+echo '#!/bin/sh\naiguard .' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
 ```
 
 ---
@@ -168,21 +226,33 @@ cp node_modules/@rimenko-dev/aiguard/claude-hook/settings.json .claude/settings.
 | Level | Meaning | Blocks publish? |
 |-------|---------|-----------------|
 | 🚨 CRITICAL | AI secret file will be included in the package | ✅ Yes |
-| ⚠️ HIGH | Known secret pattern found in a file that will be published | ✅ Yes |
-| 💡 WARN | Potential risk (file exists locally, `.npmignore` gap) | ❌ No |
+| ⚠️ HIGH | Known secret pattern found in a publishable file | ✅ Yes |
+| 💡 WARN | Risk exists locally (excluded file contains secrets, missing .npmignore) | ❌ No |
 
 ---
 
 ## How it works
 
 **For npm projects** (has `package.json`):
-1. Resolves exactly which files `npm publish` would include — respects `files` field and `.npmignore`
+1. Resolves exactly which files `npm publish` would include — respects `files` field and `.npmignore` (including wildcard patterns like `*.env`, `*.local`)
 2. Scans only those files — no false positives from files that won't be published
-3. Blocks publish on CRITICAL or HIGH findings
+3. Reports ALL instances of each secret per file (not just the first)
+4. Blocks publish on CRITICAL or HIGH findings
 
 **For non-npm projects** (Go, Python, Rust, etc.):
 1. Scans all non-gitignored files
 2. Reports findings before `git push`
+
+**Crypto mnemonic validation:**
+Candidate phrases are validated against the full official BIP39 wordlist (2048 words). At least 90% of words must be real BIP39 words — ordinary English sentences are not flagged.
+
+**Base64 detection:**
+Strings labeled as keys/tokens are decoded from Base64, then the decoded value is checked against all known secret prefixes (`sk-ant-`, `AKIA`, `sk_live_`, etc.).
+
+**What it does NOT scan:**
+- Environment variables (runtime values, not in files)
+- Binary files, images, PDFs
+- Non-standard secret formats with no known prefix
 
 ---
 
@@ -219,7 +289,7 @@ npx @rimenko-dev/aiguard
 
 ## Contributing
 
-Pull requests welcome. To add new secret patterns, edit `src/patterns.js` — each entry needs a `name` and a `regex` with the `g` flag.
+Pull requests welcome. To add new secret patterns, edit `src/patterns.js` — each entry needs a `name` and a `regex` with the `g` flag. Patterns that need post-match validation (like BIP39 mnemonics) can add a `validate(match)` function.
 
 ---
 
