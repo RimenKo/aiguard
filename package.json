@@ -1,5 +1,5 @@
 {
-  "name": "aiguard",
+  "name": "@rimenko-dev/aiguard",
   "version": "0.1.0",
   "description": "Protect your projects from AI-tool secret leaks — catches .claude/, .cursor/, and hidden credentials before npm publish or git push",
   "keywords": [
@@ -8,7 +8,7 @@
   "author": "RimenKo",
   "license": "MIT",
   "bin": {
-    "aiguard": "./bin/aiguard.js"
+    "aiguard": "bin/aiguard.js"
   },
   "scripts": {
     "prepublishOnly": "node bin/aiguard.js"
