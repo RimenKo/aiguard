@@ -8,7 +8,10 @@ const { AI_FOLDERS, AI_SECRET_FILES, SECRET_PATTERNS } = require('./patterns');
  * Returns list of files that will be included in npm publish.
  * Respects .npmignore and package.json "files" field.
  */
-function getPublishFiles(projectRoot) {
+// `skipped`, if passed, collects "files" entries that were dropped because they
+// (or their symlink target) resolve outside projectRoot — so the caller can
+// warn instead of silently scanning less than it claims to.
+function getPublishFiles(projectRoot, skipped) {
   // Read package.json
   const pkgPath = path.join(projectRoot, 'package.json');
   if (!fs.existsSync(pkgPath)) return [];
@@ -18,7 +21,7 @@ function getPublishFiles(projectRoot) {
 
   // If "files" field is set — only those are published
   if (pkg.files && Array.isArray(pkg.files) && pkg.files.length > 0) {
-    return expandGlobs(pkg.files, projectRoot);
+    return expandGlobs(pkg.files, projectRoot, skipped);
   }
 
   // Otherwise everything except .npmignore / .gitignore exclusions
@@ -124,9 +127,21 @@ function isIgnored(rel, name, ignoreList) {
 // from making the scanner read (and print) files outside the project.
 // Also rejects a path whose real target (after resolving symlinks) escapes
 // root — a symlink checked into the project can point outside it.
+//
+// `root` itself is resolved through realpath too, not just `full` — on
+// macOS/Linux common roots like /tmp are themselves symlinks (/tmp ->
+// /private/tmp). Comparing a lexical root against a realpath'd file would
+// make every file look like it escapes root, silently dropping the whole
+// project from the scan.
 function resolveWithinRoot(root, relPath) {
-  const resolvedRoot = path.resolve(root);
-  const full = path.resolve(root, relPath);
+  let resolvedRoot;
+  try {
+    resolvedRoot = fs.realpathSync(path.resolve(root));
+  } catch (_) {
+    resolvedRoot = path.resolve(root); // project root doesn't exist on disk (yet) — lexical fallback
+  }
+
+  const full = path.resolve(resolvedRoot, relPath);
   if (full !== resolvedRoot && !full.startsWith(resolvedRoot + path.sep)) {
     return null;
   }
@@ -135,11 +150,16 @@ function resolveWithinRoot(root, relPath) {
     if (real !== resolvedRoot && !real.startsWith(resolvedRoot + path.sep)) {
       return null;
     }
-  } catch (_) { /* doesn't exist yet — the string-based check above already ran */ }
+  } catch (err) {
+    // ENOENT (not created yet) is fine — the string-based check above already ran.
+    // Any other error (e.g. a broken/permission-denied symlink in the middle of
+    // the path) means we can't confirm where it really points — fail closed.
+    if (err.code !== 'ENOENT') return null;
+  }
   return full;
 }
 
-function expandGlobs(patterns, root) {
+function expandGlobs(patterns, root, skipped) {
   const systemOnly = ['node_modules', '.git', '.DS_Store', 'coverage', 'dist', '.nyc_output'];
 
   // If any entry is a glob, we can't resolve it without a glob library.
@@ -152,7 +172,14 @@ function expandGlobs(patterns, root) {
   const results = [];
   for (const pattern of patterns) {
     const full = resolveWithinRoot(root, pattern);
-    if (!full) continue; // escapes project root — skip, same as npm would refuse to publish it
+    if (!full) {
+      // Escapes project root (literal "../", absolute path, or a symlink
+      // pointing outside) — refuse to read it, same as npm would refuse to
+      // publish it. Record it so scan() can surface a warning instead of
+      // silently scanning less than package.json claims to publish.
+      if (skipped) skipped.push(pattern);
+      continue;
+    }
 
     let stat;
     try { stat = fs.statSync(full); } catch (_) { continue; } // gone between existsSync and statSync, or unreadable
@@ -178,11 +205,24 @@ function scan(projectRoot) {
 
   // For npm projects: only files that will be published.
   // For other projects (Python, Go, etc.): all non-gitignored files.
+  const skippedFiles = [];
   const publishFiles = isNpmProject
-    ? getPublishFiles(projectRoot)
+    ? getPublishFiles(projectRoot, skippedFiles)
     : getAllFiles(projectRoot, buildIgnoreList(projectRoot));
 
   const context = isNpmProject ? 'npm-пакет' : 'git-коммит';
+
+  // 0. "files" entries that point outside the project (directly or via a
+  //    symlink) are never read — but say so instead of quietly scanning
+  //    less than package.json claims to publish.
+  for (const pattern of skippedFiles) {
+    findings.push({
+      severity: 'WARN',
+      type: 'files_entry_outside_root',
+      file: pattern,
+      detail: `Путь "${pattern}" в package.json "files" ведёт за пределы папки проекта (напрямую или через симлинк) — aiguard его НЕ прочитал. Если это ожидаемо (например ссылка на общий пакет в монорепозитории) — проверь его содержимое отдельно.`,
+    });
+  }
 
   // 1. Check for AI tool folders in published files
   for (const aiFolder of AI_FOLDERS) {
