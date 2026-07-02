@@ -119,6 +119,18 @@ function isIgnored(rel, name, ignoreList) {
   });
 }
 
+// Resolves `relPath` against `root` and returns the absolute path only if it
+// stays inside root. Blocks package.json "files" entries like "../../.env"
+// from making the scanner read (and print) files outside the project.
+function resolveWithinRoot(root, relPath) {
+  const resolvedRoot = path.resolve(root);
+  const full = path.resolve(root, relPath);
+  if (full !== resolvedRoot && !full.startsWith(resolvedRoot + path.sep)) {
+    return null;
+  }
+  return full;
+}
+
 function expandGlobs(patterns, root) {
   const systemOnly = ['node_modules', '.git', '.DS_Store', 'coverage', 'dist', '.nyc_output'];
 
@@ -131,7 +143,8 @@ function expandGlobs(patterns, root) {
 
   const results = [];
   for (const pattern of patterns) {
-    const full = path.join(root, pattern);
+    const full = resolveWithinRoot(root, pattern);
+    if (!full) continue; // escapes project root — skip, same as npm would refuse to publish it
     if (fs.existsSync(full)) {
       const stat = fs.statSync(full);
       if (stat.isDirectory()) {
@@ -222,7 +235,8 @@ function scan(projectRoot) {
     if (AI_SECRET_FILES.includes(relFile)) continue;
     if (isBinary(relFile)) continue;
 
-    const full = path.join(projectRoot, relFile);
+    const full = resolveWithinRoot(projectRoot, relFile);
+    if (!full) continue; // defense in depth — publishFiles should already be root-safe
     const content = safeRead(full);
     if (!content) continue;
 
