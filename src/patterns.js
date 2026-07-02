@@ -2,6 +2,48 @@
 
 const { BIP39_WORDS } = require('./bip39');
 
+// BIP39_WORDS preserves the official spec order (a Set built from an array
+// literal keeps insertion order in JS) — used below to tell a wordlist
+// definition (words listed in ascending canonical order, e.g. bip39.js
+// itself) apart from an actual mnemonic, whose word order comes from random
+// entropy. A monotonically increasing run of 12+ canonical indices has
+// probability ~1/12! per window for a real seed — treating it as "not a
+// seed" costs no real detections but kills the single biggest self-inflicted
+// false positive: any project (including this one) that vendors the BIP39
+// wordlist.
+const BIP39_INDEX = new Map();
+{
+  let i = 0;
+  for (const w of BIP39_WORDS) BIP39_INDEX.set(w, i++);
+}
+
+function isCanonicalOrder(words) {
+  let prev = -1;
+  for (const w of words) {
+    const idx = BIP39_INDEX.get(w);
+    if (idx === undefined || idx <= prev) return false;
+    prev = idx;
+  }
+  return true;
+}
+
+// Slides a window of official BIP39 lengths across `words` and returns true
+// if any window is both a real mnemonic length AND >=90% dictionary words —
+// lets a genuine seed survive even when it's glued to a label or trailing
+// word ("wallet phrase: <12 words>", "<12 words> // backup") that the greedy
+// token-run regex swept into the same match.
+const MNEMONIC_LENGTHS = [24, 21, 18, 15, 12];
+function containsMnemonic(words) {
+  for (const len of MNEMONIC_LENGTHS) {
+    for (let i = 0; i + len <= words.length; i++) {
+      const window = words.slice(i, i + len);
+      const inDict = window.filter((w) => BIP39_WORDS.has(w)).length;
+      if (inDict / len >= 0.9 && !isCanonicalOrder(window)) return true;
+    }
+  }
+  return false;
+}
+
 // AI-tool folders that often contain secrets
 const AI_FOLDERS = [
   '.claude',
@@ -100,30 +142,35 @@ const SECRET_PATTERNS = [
   // ── Crypto — #1 finding in our GitHub research (45 cases) ────
   {
     name: 'Crypto mnemonic (BIP39 seed)',
-    // Matches 12 or 24 words in any case (lower, UPPER, Mixed).
-    // validate() normalises to lowercase and confirms via BIP39 dictionary.
-    // Without the dictionary check, any English sentence would match.
-    regex: /\b(?:[a-zA-Z]{3,8}[ \n]+){11,23}[a-zA-Z]{3,8}\b/g,
+    // Matches a run of 12+ words in any case (lower, UPPER, Mixed),
+    // separated by spaces, commas, tabs, line breaks (LF/CRLF/CR), or
+    // markdown list bullets (-, *, •) — including JSON/Python-array form
+    // where each word is quoted ("abandon","ability",... or 'abandon',
+    // 'ability', ...).
+    // No upper bound on the run: a real seed is often glued to a label or
+    // trailing word ("wallet phrase: <12 words>"), so validate() slides a
+    // window for the actual mnemonic length (12/15/18/21/24) instead of
+    // requiring the whole run to be exactly that long.
+    regex: /\b["']?[a-zA-Z]{3,8}["']?(?:[ \t\r\n,*•-]+["']?[a-zA-Z]{3,8}["']?){11,}\b/g,
     validate: (match) => {
       try {
-        const words = match.trim().toLowerCase().split(/[ \n]+/);
-        if (words.length !== 12 && words.length !== 24) return false;
-        const inDict = words.filter((w) => BIP39_WORDS.has(w)).length;
-        return inDict / words.length >= 0.9;
+        const words = match.trim().toLowerCase().split(/[ \t\r\n,"'*•-]+/).filter(Boolean);
+        return containsMnemonic(words);
       } catch (_) { return false; }
     },
   },
   {
     name: 'Crypto mnemonic (numbered BIP39 seed)',
-    // Matches numbered formats: "1. abandon 2. ability ... 12. zoo"
-    // or "1) abandon 2) ability..." — common in backup exports and screenshots.
-    regex: /1[.)]\s*[a-zA-Z]{3,8}(?:[ \t]*\d+[.)]\s*[a-zA-Z]{3,8}){11,23}/g,
+    // Matches numbered formats: "1. abandon 2. ability ... 12. zoo",
+    // "1) abandon 2) ability...", or one numbered word per line — common in
+    // backup exports and screenshots. Same sliding-window validate() as the
+    // plain pattern, so an extra numbered item glued to a real seed doesn't
+    // push the total length out of the valid set and lose the match.
+    regex: /1[.)]\s*[a-zA-Z]{3,8}(?:\s*\d+[.)]\s*[a-zA-Z]{3,8}){11,}/g,
     validate: (match) => {
       try {
         const words = match.toLowerCase().replace(/\d+[.)]\s*/g, ' ').trim().split(/\s+/).filter(w => /^[a-z]+$/.test(w));
-        if (words.length !== 12 && words.length !== 24) return false;
-        const inDict = words.filter((w) => BIP39_WORDS.has(w)).length;
-        return inDict / words.length >= 0.9;
+        return containsMnemonic(words);
       } catch (_) { return false; }
     },
   },
