@@ -133,14 +133,23 @@ function isIgnored(rel, name, ignoreList) {
 // /private/tmp). Comparing a lexical root against a realpath'd file would
 // make every file look like it escapes root, silently dropping the whole
 // project from the scan.
-function resolveWithinRoot(root, relPath) {
-  let resolvedRoot;
+//
+// Shared with expandGlobs(), which needs the same real root as the `base`
+// it hands to getAllFiles() — mixing a lexical base with a realpath'd
+// startDir makes path.relative() emit "../.." garbage for every file in a
+// directory (e.g. a "files": ["src"] entry), which then fails the safety
+// check below and gets silently dropped, same failure as the root mismatch
+// this function exists to prevent.
+function realRootOf(root) {
   try {
-    resolvedRoot = fs.realpathSync(path.resolve(root));
+    return fs.realpathSync(path.resolve(root));
   } catch (_) {
-    resolvedRoot = path.resolve(root); // project root doesn't exist on disk (yet) — lexical fallback
+    return path.resolve(root); // project root doesn't exist on disk (yet) — lexical fallback
   }
+}
 
+function resolveWithinRoot(root, relPath) {
+  const resolvedRoot = realRootOf(root);
   const full = path.resolve(resolvedRoot, relPath);
   if (full !== resolvedRoot && !full.startsWith(resolvedRoot + path.sep)) {
     return null;
@@ -185,7 +194,12 @@ function expandGlobs(patterns, root, skipped) {
     try { stat = fs.statSync(full); } catch (_) { continue; } // gone between existsSync and statSync, or unreadable
 
     if (stat.isDirectory()) {
-      results.push(...getAllFiles(full, [], root));
+      // `full` is already real (resolveWithinRoot resolved it through
+      // realpath) — `base` must be real too, or path.relative(base, entry)
+      // emits "../.." garbage for every file whenever `root` is reached
+      // through a symlinked ancestor, and those files get silently dropped
+      // downstream instead of ending up in the scan.
+      results.push(...getAllFiles(full, [], realRootOf(root)));
     } else {
       results.push(pattern);
     }
