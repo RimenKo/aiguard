@@ -122,12 +122,20 @@ function isIgnored(rel, name, ignoreList) {
 // Resolves `relPath` against `root` and returns the absolute path only if it
 // stays inside root. Blocks package.json "files" entries like "../../.env"
 // from making the scanner read (and print) files outside the project.
+// Also rejects a path whose real target (after resolving symlinks) escapes
+// root — a symlink checked into the project can point outside it.
 function resolveWithinRoot(root, relPath) {
   const resolvedRoot = path.resolve(root);
   const full = path.resolve(root, relPath);
   if (full !== resolvedRoot && !full.startsWith(resolvedRoot + path.sep)) {
     return null;
   }
+  try {
+    const real = fs.realpathSync(full);
+    if (real !== resolvedRoot && !real.startsWith(resolvedRoot + path.sep)) {
+      return null;
+    }
+  } catch (_) { /* doesn't exist yet — the string-based check above already ran */ }
   return full;
 }
 
@@ -145,13 +153,14 @@ function expandGlobs(patterns, root) {
   for (const pattern of patterns) {
     const full = resolveWithinRoot(root, pattern);
     if (!full) continue; // escapes project root — skip, same as npm would refuse to publish it
-    if (fs.existsSync(full)) {
-      const stat = fs.statSync(full);
-      if (stat.isDirectory()) {
-        results.push(...getAllFiles(full, [], root));
-      } else {
-        results.push(pattern);
-      }
+
+    let stat;
+    try { stat = fs.statSync(full); } catch (_) { continue; } // gone between existsSync and statSync, or unreadable
+
+    if (stat.isDirectory()) {
+      results.push(...getAllFiles(full, [], root));
+    } else {
+      results.push(pattern);
     }
   }
   return results;
