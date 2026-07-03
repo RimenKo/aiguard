@@ -29,7 +29,28 @@ function isUnderAnyDir(relPath, dirNames) {
 // warn instead of silently scanning less than it claims to.
 // `gitWarnings`, if passed, collects human-readable notices when git-aware
 // file discovery (see getAllFilesGitAware below) couldn't complete.
-function getPublishFiles(projectRoot, skipped, gitWarnings) {
+// `npmWarnings`, if passed, collects a notice when `npm pack --dry-run`
+// itself couldn't complete (see getNpmPackFiles below).
+//
+// Strategy: compute our own emulated publish list first (unchanged from
+// before), then UNION it with the exact manifest `npm pack --dry-run --json`
+// reports — never replace. Emulation and npm's real packer each catch things
+// the other misses:
+//   - npm's manifest is the only one that knows about npm's own always-ignore
+//     defaults + always-include specials (package.json/README/LICENSE), and
+//     doesn't hardcode "dist" as excluded the way buildIgnoreList() does — so
+//     it catches a secret in dist/ (published for real, but hidden from our
+//     emulation) or in package.json/README when "files" is set but doesn't
+//     list them (npm still publishes them unconditionally).
+//   - our emulation is the only one that consults git tracking directly
+//     (getGitTrackedFiles), which is how it catches a file that was committed
+//     before a later .gitignore rule excluded it — real `npm pack` (this npm
+//     version) treats .gitignore as pure glob-exclusion and does NOT consult
+//     git tracking, so it misses that case on its own.
+// Unioning keeps both catches; the only cost is scanning a few paths that
+// won't actually end up in the tarball, which is the safe direction to err
+// in for a leak scanner.
+function getPublishFiles(projectRoot, skipped, gitWarnings, npmWarnings) {
   // Read package.json
   const pkgPath = path.join(projectRoot, 'package.json');
   if (!fs.existsSync(pkgPath)) return [];
@@ -37,14 +58,33 @@ function getPublishFiles(projectRoot, skipped, gitWarnings) {
   let pkg = {};
   try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch (_) {}
 
-  // If "files" field is set — only those are published
+  let emulated;
   if (pkg.files && Array.isArray(pkg.files) && pkg.files.length > 0) {
-    return expandGlobs(pkg.files, projectRoot, skipped);
+    // If "files" field is set — only those are published
+    emulated = expandGlobs(pkg.files, projectRoot, skipped);
+  } else {
+    // Otherwise everything except .npmignore / .gitignore exclusions
+    const files = getAllFilesGitAware(projectRoot, buildIgnoreList(projectRoot), gitWarnings);
+    emulated = files.filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
   }
 
-  // Otherwise everything except .npmignore / .gitignore exclusions
-  const files = getAllFilesGitAware(projectRoot, buildIgnoreList(projectRoot), gitWarnings);
-  return files.filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
+  const npmErrorDetail = [];
+  const npmFiles = getNpmPackFiles(projectRoot, npmErrorDetail);
+  if (npmFiles === null) {
+    if (npmWarnings) {
+      const reason = npmErrorDetail[0] ? ` Причина: ${npmErrorDetail[0]}` : '';
+      npmWarnings.push(`Команда "npm pack --dry-run" не отработала (npm недоступен, таймаут, невалидный package.json или другая ошибка самого npm) — список публикуемых файлов эмулируется вручную и может разойтись с тем, что реально отправит npm publish (например secret в dist/, или package.json/README при заданном "files").${reason}`);
+    }
+    return emulated;
+  }
+
+  // Same NFC-normalizing merge getAllFilesGitAware() uses above, for the same
+  // reason: the two lists must compare byte-for-byte per file or the Set
+  // fails to de-duplicate a name that differs only in Unicode normalization
+  // form between npm's output and our own fs walk.
+  const merged = new Set(emulated.map((f) => f.normalize('NFC')));
+  for (const f of npmFiles) merged.add(f.normalize('NFC'));
+  return Array.from(merged);
 }
 
 function buildIgnoreList(projectRoot) {
@@ -113,6 +153,11 @@ function getAllFiles(startDir, ignoreList, base) {
 // process (lock contention, stalled network FS) hanging the whole scan.
 const GIT_COMMAND_TIMEOUT_MS = 10000;
 
+// npm CLI startup (module resolution, config file reads) is slower than a
+// single git invocation, so this gets more headroom before being treated as
+// wedged. Still just a backstop — a local dry-run pack does no network I/O.
+const NPM_COMMAND_TIMEOUT_MS = 15000;
+
 function isGitRepo(projectRoot) {
   const { execFileSync } = require('child_process');
   try {
@@ -147,6 +192,56 @@ function getGitTrackedFiles(projectRoot) {
   } catch (_) {
     return null;
   }
+}
+
+// Returns the EXACT file list `npm publish` would ship, straight from npm's
+// own packer — or null if the call itself couldn't be trusted (npm missing,
+// timeout, non-zero exit, or output that doesn't parse as the manifest shape
+// we expect), so the caller can fall back instead of treating "npm failed"
+// as "this project publishes nothing".
+//
+// --ignore-scripts is mandatory, not optional: `npm pack`, even with
+// --dry-run, still executes the target's prepack/postpack lifecycle scripts
+// (verified empirically — dry-run only skips writing the tarball, not
+// running scripts). A secret scanner has no business executing arbitrary
+// code from the project it's supposed to be passively reading.
+//
+// Paths come back npm-normalized with '/' separators; converted to path.sep
+// to compare equal with the rest of this file's path.relative()-produced
+// paths (same reasoning as getGitTrackedFiles() above).
+//
+// `errorDetail`, if passed, gets npm's own one-line explanation pushed onto
+// it on failure (e.g. "code EJSONPARSE" for a broken package.json) — so the
+// caller's warning says *why* npm pack couldn't be trusted instead of just
+// that it couldn't.
+function getNpmPackFiles(projectRoot, errorDetail) {
+  const { execFileSync } = require('child_process');
+  let output;
+  try {
+    output = execFileSync(
+      'npm', ['pack', '--dry-run', '--json', '--ignore-scripts'],
+      { cwd: projectRoot, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: NPM_COMMAND_TIMEOUT_MS }
+    ).toString('utf8');
+  } catch (err) {
+    if (errorDetail) {
+      const line = (err.stderr || '').toString('utf8')
+        .split('\n')
+        .map((l) => l.replace(/^npm error\s*/i, '').trim())
+        .find(Boolean);
+      errorDetail.push(line || err.message || 'неизвестная ошибка');
+    }
+    return null;
+  }
+
+  let parsed;
+  try { parsed = JSON.parse(output); } catch (_) { return null; }
+
+  const manifest = Array.isArray(parsed) ? parsed[0] : null;
+  if (!manifest || !Array.isArray(manifest.files)) return null;
+
+  return manifest.files
+    .filter((f) => f && typeof f.path === 'string')
+    .map((f) => f.path.split('/').join(path.sep));
 }
 
 // Wraps getAllFiles() with getGitTrackedFiles() so a git-tracked or
@@ -352,8 +447,9 @@ function scan(projectRoot) {
   // For other projects (Python, Go, etc.): all non-gitignored files.
   const skippedFiles = [];
   const gitWarnings = [];
+  const npmWarnings = [];
   const publishFiles = isNpmProject
-    ? getPublishFiles(projectRoot, skippedFiles, gitWarnings)
+    ? getPublishFiles(projectRoot, skippedFiles, gitWarnings, npmWarnings)
     : getAllFilesGitAware(projectRoot, buildIgnoreList(projectRoot), gitWarnings);
 
   const context = isNpmProject ? 'npm-пакет' : 'git-коммит';
@@ -374,6 +470,13 @@ function scan(projectRoot) {
   //     silently looking as thorough as a normal run (see getAllFilesGitAware).
   for (const detail of gitWarnings) {
     findings.push({ severity: 'WARN', type: 'git_awareness_degraded', file: '.', detail });
+  }
+
+  // 0c. `npm pack --dry-run` itself didn't complete — say so instead of
+  //     silently relying on our own emulation without flagging the gap
+  //     (see getNpmPackFiles / getPublishFiles).
+  for (const detail of npmWarnings) {
+    findings.push({ severity: 'WARN', type: 'npm_pack_degraded', file: '.', detail });
   }
 
   // 1. Check for AI tool folders in published files

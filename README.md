@@ -219,6 +219,14 @@ echo '#!/bin/sh\naiguard .' > .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 ```
 
+> **Note:** aiguard shells out to `npm pack --dry-run` internally to get npm's
+> exact publish list (secrets in `dist/` or in `README.md`/`package.json`
+> otherwise slip through), which adds roughly 0.3–1.5s per run. That's on
+> every commit if you use it as a pre-commit hook. If that's noticeable on a
+> large repo with frequent commits, a `pre-push` hook (same one-liner, just
+> in `.git/hooks/pre-push`) still catches everything before a secret leaves
+> your machine, at a fraction of the invocation count.
+
 ---
 
 ## Severity levels

@@ -160,22 +160,29 @@ test('npm project: unignored untracked node_modules is never reported as "will b
   );
 });
 
-test('npm project: nested node_modules (not at project root) is also never reported', () => {
+// npm only excludes node_modules at the project ROOT, not at any depth —
+// verified directly against npm's own source (npm-packlist's default ignore
+// rules use '/node_modules', anchored with a leading slash, unlike e.g.
+// '.npmrc' which is intentionally left unanchored). A nested node_modules-
+// named directory elsewhere in the tree is real, publishable content as far
+// as npm is concerned (e.g. a module-resolution test fixture some package
+// ships on purpose) — getPublishFiles()'s npm-pack union now reflects that
+// real behavior directly, superseding this test's previous (incorrect)
+// "excluded at any depth" assumption, which getNpmPackFiles() was added to
+// stop relying on hand-rolled guesses for.
+test('npm project: nested node_modules (not at project root) IS published — must be reported, not excluded', () => {
   const dir = makeTempProject();
   initGitRepo(dir);
   writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg', version: '1.0.0' }));
-  // No .gitignore — untracked and unignored at any depth, exactly like the
-  // top-level case, but nested under src/. npm excludes node_modules
-  // regardless of depth, so this must stay unreported too.
   writeFile(dir, 'src/node_modules/dep/index.js', `const key = "${FAKE_SECRET}";`);
-  // A directory that merely LOOKS like node_modules must NOT be swept up by
-  // the same filter — it's a real, publishable path.
+  // A directory that only resembles node_modules by name was never excluded
+  // by any filter in the first place — kept as a control case.
   writeFile(dir, 'my-node_modules-backup/index.js', `const key = "${FAKE_SECRET}";`);
 
   const findings = scanIsolated(dir);
   assert.strictEqual(
-    findingsFor(findings, 'src/node_modules/dep/index.js').length, 0,
-    'nested node_modules must not be reported as publishable, npm excludes it at any depth'
+    findingsFor(findings, 'src/node_modules/dep/index.js').length, 1,
+    'npm only excludes node_modules at project root ("/node_modules", anchored) — a nested one is real published content and must be reported'
   );
   assert.strictEqual(
     findingsFor(findings, 'my-node_modules-backup/index.js').length, 1,
@@ -221,6 +228,67 @@ test('non-ASCII filename (NFD/NFC mismatch) — same file not reported twice', (
     findings.filter((f) => f.type === 'secret_pattern').length, 1,
     'the same file must not be reported twice under two Unicode-normalization forms of its name'
   );
+});
+
+// ── getNpmPackFiles(): npm truth catches what our own emulation misses ─
+// dyra #5: buildIgnoreList()'s defaultIgnore hardcodes 'dist' as excluded
+// unconditionally — but real npm has no such rule and publishes dist/ like
+// any other directory unless "files" or .npmignore/.gitignore says otherwise.
+test('npm project, no "files" field: secret in dist/ IS published by real npm — must be reported', () => {
+  const dir = makeTempProject(); // no git needed — npm pack doesn't require it
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-dist', version: '1.0.0' }));
+  writeFile(dir, 'dist/bundle.js', `const key = "${FAKE_SECRET}";`);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'dist/bundle.js').length, 1,
+    'real npm publishes dist/ by default (verified via npm pack --dry-run) — our old hand-rolled defaultIgnore wrongly hardcodes it as excluded, so only the npm-pack union catches this'
+  );
+});
+
+// dyra #6: when "files" is set, expandGlobs() only resolves exactly what's
+// listed — but npm always publishes package.json/README/LICENSE regardless
+// of whether "files" lists them. A secret sitting in one of those slips past
+// the old emulation entirely.
+test('npm project, "files" field set without README.md: secret in README.md IS published — must be reported', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-readme', version: '1.0.0', files: ['src/'] }));
+  writeFile(dir, 'src/index.js', 'module.exports = 1;');
+  // README.md is deliberately NOT listed in "files" — npm ships it anyway.
+  // Phrased like the other tests' fixtures (`const key = "..."`), not
+  // "secret: ..." — that label alone independently matches the unrelated
+  // "generic secret in env" pattern too, which would make this test about
+  // pattern-matching nuance instead of about file inclusion.
+  writeFile(dir, 'README.md', `# tmp-pkg-readme\n\nconst key = "${FAKE_SECRET}";\n`);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'README.md').length, 1,
+    'npm always publishes README.md even when "files" doesn\'t list it — expandGlobs() alone would miss this, only the npm-pack union catches it'
+  );
+});
+
+// ── npm pack itself unavailable — graceful fallback, not a crash or a gap ──
+test('npm unavailable (stripped PATH): scan() falls back to emulation and warns, does not crash', () => {
+  const dir = makeTempProject(); // no git — isGitRepo() will just report false
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-nonpm', version: '1.0.0' }));
+  writeFile(dir, 'index.js', `const key = "${FAKE_SECRET}";`);
+
+  const prevPath = process.env.PATH;
+  process.env.PATH = '';
+  let findings;
+  try {
+    assert.doesNotThrow(() => { findings = scan(dir); });
+  } finally {
+    process.env.PATH = prevPath;
+  }
+
+  assert.strictEqual(
+    findingsFor(findings, 'index.js').length, 1,
+    'ignore-based emulation alone (no git, no npm reachable) must still catch the secret'
+  );
+  const degraded = findings.filter((f) => f.type === 'npm_pack_degraded');
+  assert.strictEqual(degraded.length, 1, 'expected a warning that npm pack --dry-run could not run');
 });
 
 // ── git-tracked symlink to another tracked file ─────────────────────────
