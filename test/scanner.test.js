@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { scan } = require('../src/scanner');
+const { scan, scanGitHistory } = require('../src/scanner');
 
 // A well-formed but fake AWS Access Key ID — matches SECRET_PATTERNS with no
 // validate() step, so it's a reliable trigger for these throwaway temp repos.
@@ -453,6 +453,78 @@ test('git-tracked symlink to another tracked file — secret not double-counted'
     findings.filter((f) => f.type === 'secret_pattern').length, 1,
     'a git-tracked symlink to an already-scanned file must not double the finding'
   );
+});
+
+// ── scanGitHistory: dyra #4 — --diff-filter=A only saw brand-new files ─
+test('scanGitHistory: secret added by editing an already-tracked file is caught, not just secrets in new files', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'config.js', 'module.exports = {};\n');
+  git(dir, ['add', 'config.js']);
+  git(dir, ['commit', '--quiet', '-m', 'add config']);
+  // config.js already exists and is tracked — this commit's file status is
+  // "modified", not "added". The old --diff-filter=A dropped this commit
+  // from `git log` entirely, so the secret below was never scanned.
+  writeFile(dir, 'config.js', `module.exports = { key: '${FAKE_SECRET}' };\n`);
+  git(dir, ['add', 'config.js']);
+  git(dir, ['commit', '--quiet', '-m', 'edit config, add secret']);
+
+  const hits = scanGitHistory(dir).filter((f) => f.type === 'secret_pattern');
+  assert.strictEqual(
+    hits.length, 1,
+    'a secret added via an edit to an already-tracked file must be caught in history scanning'
+  );
+});
+
+// Exact scenario named in the task: added by an edit, then removed by a
+// later edit — must still surface from history even though the working
+// tree (and a scan() of the current tree) no longer contains it.
+test('scanGitHistory: secret added by an edit, then removed by a later edit — still caught in history', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'config.js', 'module.exports = {};\n');
+  git(dir, ['add', 'config.js']);
+  git(dir, ['commit', '--quiet', '-m', 'add config']);
+  writeFile(dir, 'config.js', `module.exports = { key: '${FAKE_SECRET}' };\n`);
+  git(dir, ['add', 'config.js']);
+  git(dir, ['commit', '--quiet', '-m', 'edit config, add secret']);
+  writeFile(dir, 'config.js', 'module.exports = {};\n');
+  git(dir, ['add', 'config.js']);
+  git(dir, ['commit', '--quiet', '-m', 'remove secret']);
+
+  const hits = scanGitHistory(dir).filter((f) => f.type === 'secret_pattern');
+  assert.strictEqual(
+    hits.length, 1,
+    'the secret must still be found in a past commit even though a later commit removed it from the working tree'
+  );
+});
+
+// ── scanGitHistory: dyra #9 — a failed `git log` silently returned [] ──
+test('scanGitHistory: git log itself fails (corrupted branch ref) — visible warning, not a silent empty result', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'file.js', 'const a = 1;\n');
+  git(dir, ['add', 'file.js']);
+  git(dir, ['commit', '--quiet', '-m', 'add file']);
+
+  // Corrupt every branch ref to a SHA that doesn't exist in the object
+  // database. `git rev-parse --is-inside-work-tree` (scanGitHistory's own
+  // "is this a git repo" check) doesn't need to resolve any ref and still
+  // succeeds, but `git log --all` fails with "fatal: bad object" trying to
+  // walk history from it — exactly the failure this catch block covers.
+  const headsDir = path.join(dir, '.git', 'refs', 'heads');
+  for (const ref of fs.readdirSync(headsDir)) {
+    fs.writeFileSync(path.join(headsDir, ref), 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n');
+  }
+
+  const findings = scanGitHistory(dir);
+  assert.notStrictEqual(
+    findings.length, 0,
+    'a failed "git log" must produce a visible warning, not silently look like "history is clean"'
+  );
+  const failed = findings.filter((f) => f.type === 'git_history_scan_failed');
+  assert.strictEqual(failed.length, 1, 'expected exactly one git_history_scan_failed warning');
+  assert.strictEqual(failed[0].severity, 'WARN');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

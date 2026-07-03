@@ -53,6 +53,12 @@ const GIT_COMMAND_TIMEOUT_MS = 10000;
 // wedged. Still just a backstop — a local dry-run pack does no network I/O.
 const NPM_COMMAND_TIMEOUT_MS = 15000;
 
+// scanGitHistory's `git log` walks every commit's full diff — legitimately
+// much slower than the single-tree listing GIT_COMMAND_TIMEOUT_MS backstops
+// (see its comment above), so a real large-but-healthy repo needs more
+// headroom before this backstop mistakes "still working" for "wedged".
+const GIT_HISTORY_TIMEOUT_MS = 60000;
+
 function isGitRepo(projectRoot) {
   const { execFileSync } = require('child_process');
   try {
@@ -591,7 +597,10 @@ function isBinaryBuffer(buf) {
 /**
  * Scans git history for secrets that were ever committed.
  * Extracts all "added" lines from every commit and runs secret patterns on them.
- * Returns deduplicated findings tagged with the first commit SHA where the secret appeared.
+ * Returns deduplicated findings tagged with the newest commit SHA carrying the
+ * secret — `git log` walks newest-to-oldest and dedup keeps the first one
+ * seen, so this is the most recent commit with the line, not necessarily the
+ * one that originally introduced it.
  */
 function scanGitHistory(projectRoot) {
   const { execFileSync } = require('child_process');
@@ -599,21 +608,62 @@ function scanGitHistory(projectRoot) {
 
   // Verify this is a git repository
   try {
-    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: projectRoot, stdio: 'pipe' });
-  } catch (_) {
+    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: projectRoot, stdio: 'pipe', timeout: GIT_COMMAND_TIMEOUT_MS });
+  } catch (err) {
+    // A wedged git process (err.code === 'ETIMEDOUT', set by Node when the
+    // `timeout` option kills the child) is NOT the same fact as "this isn't a
+    // git repository" — the former means history genuinely wasn't checked
+    // and must say so, or a hung git process would misreport as "no_git"
+    // instead of the visible git_history_scan_failed warning this whole fix
+    // exists to produce. A real non-repo directory exits with a plain
+    // non-zero status (128) and no ETIMEDOUT code.
+    if (err.code === 'ETIMEDOUT') {
+      return [{
+        severity: 'WARN',
+        type: 'git_history_scan_failed',
+        file: '.',
+        detail: `Не удалось проверить, что это git-репозиторий — команда "git rev-parse" не уложилась в ${GIT_COMMAND_TIMEOUT_MS / 1000}с (завис git-процесс) — история НЕ проверена, отсутствие находок здесь не означает отсутствие секретов в прошлых коммитах.`,
+      }];
+    }
+    // git itself missing (ENOENT) or unreadable (EACCES) is a different fact
+    // than "this directory just isn't a git repository" — the latter is
+    // normal and expected (e.g. before `git init`), the former means the
+    // check couldn't even run and history coverage genuinely degraded.
+    if (err.code === 'ENOENT' || err.code === 'EACCES') {
+      return [{
+        severity: 'WARN',
+        type: 'git_history_scan_failed',
+        file: '.',
+        detail: `Не удалось проверить, что это git-репозиторий — команда "git" недоступна (не установлена или нет прав доступа) — история НЕ проверена, отсутствие находок здесь не означает отсутствие секретов в прошлых коммитах. Причина: ${err.message || err.code}`,
+      }];
+    }
     return [{ severity: 'WARN', type: 'no_git', file: '.', detail: 'Не гит-репозиторий — история не проверяется.' }];
   }
 
-  // Get all added lines from all commits (additions only, no context)
-  // Split by commit so we can tag findings with the SHA
+  // Get all added lines from all commits (additions only, no context). No
+  // --diff-filter here on purpose: filtering to status A ("added") would only
+  // ever see a secret introduced in a brand-new file and miss the far more
+  // common case of a secret added by an edit to an already-tracked file
+  // (status M) — every commit's diff must be walked regardless of file status.
+  // Split by commit so we can tag findings with the SHA.
   let logOutput;
   try {
     logOutput = execFileSync(
-      'git', ['log', '--all', '--no-color', '-U0', '--diff-filter=A', '--format=COMMIT:%H'],
-      { cwd: projectRoot, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 }
+      'git', ['log', '--all', '--no-color', '-U0', '--format=COMMIT:%H'],
+      { cwd: projectRoot, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: GIT_HISTORY_TIMEOUT_MS }
     ).toString();
-  } catch (_) {
-    return [];
+  } catch (err) {
+    // Must NOT look like "history checked, nothing found" — a failed `git
+    // log` (huge repo exceeding maxBuffer, wedged process, corrupted repo)
+    // silently returning [] here would report "чисто" for history that was
+    // never actually scanned. Surface it as a visible finding instead, same
+    // pattern as getGitFileList()'s git_awareness_degraded warning above.
+    return [{
+      severity: 'WARN',
+      type: 'git_history_scan_failed',
+      file: '.',
+      detail: `Не удалось просканировать историю git (команда "git log" не отработала — например, репозиторий больше 50 МБ, таймаут или повреждённый репозиторий) — история НЕ проверена, отсутствие находок здесь не означает отсутствие секретов в прошлых коммитах. Причина: ${err.message || 'неизвестная ошибка'}`,
+    }];
   }
 
   // Parse into {sha, addedLines} blocks
