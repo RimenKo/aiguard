@@ -50,7 +50,15 @@ function isUnderAnyDir(relPath, dirNames) {
 // Unioning keeps both catches; the only cost is scanning a few paths that
 // won't actually end up in the tarball, which is the safe direction to err
 // in for a leak scanner.
-function getPublishFiles(projectRoot, skipped, gitWarnings, npmWarnings) {
+// `npmConfirmed`, if passed, gets every path npm's own manifest actually
+// listed (NFC-normalized) — so the caller can tell "npm itself will publish
+// this" apart from "only our own git/ignore-based emulation thinks so". That
+// distinction matters for messaging: a file caught ONLY through the
+// git-tracked-then-later-ignored path (see getGitTrackedFiles) really will
+// leak, but via `git push`, not `npm publish` — saying "will be published to
+// npm" about it is factually wrong about the channel, even though flagging
+// it at all is correct.
+function getPublishFiles(projectRoot, skipped, gitWarnings, npmWarnings, npmConfirmed) {
   // Read package.json
   const pkgPath = path.join(projectRoot, 'package.json');
   if (!fs.existsSync(pkgPath)) return [];
@@ -82,8 +90,13 @@ function getPublishFiles(projectRoot, skipped, gitWarnings, npmWarnings) {
   // reason: the two lists must compare byte-for-byte per file or the Set
   // fails to de-duplicate a name that differs only in Unicode normalization
   // form between npm's output and our own fs walk.
+  const npmFilesNFC = npmFiles.map((f) => f.normalize('NFC'));
+  if (npmConfirmed) {
+    for (const f of npmFilesNFC) npmConfirmed.add(f);
+  }
+
   const merged = new Set(emulated.map((f) => f.normalize('NFC')));
-  for (const f of npmFiles) merged.add(f.normalize('NFC'));
+  for (const f of npmFilesNFC) merged.add(f);
   return Array.from(merged);
 }
 
@@ -448,11 +461,18 @@ function scan(projectRoot) {
   const skippedFiles = [];
   const gitWarnings = [];
   const npmWarnings = [];
+  const npmConfirmedFiles = new Set();
   const publishFiles = isNpmProject
-    ? getPublishFiles(projectRoot, skippedFiles, gitWarnings, npmWarnings)
+    ? getPublishFiles(projectRoot, skippedFiles, gitWarnings, npmWarnings, npmConfirmedFiles)
     : getAllFilesGitAware(projectRoot, buildIgnoreList(projectRoot), gitWarnings);
 
   const context = isNpmProject ? 'npm-пакет' : 'git-коммит';
+  // True only when npm pack --dry-run itself succeeded — i.e. npmConfirmedFiles
+  // is a trustworthy "npm will really publish exactly this" answer, not an
+  // empty set from a failed/skipped call. Only then can "not in
+  // npmConfirmedFiles" be read as "npm itself excludes this" rather than
+  // "we don't know".
+  const npmPackSucceeded = isNpmProject && npmWarnings.length === 0;
 
   // 0. "files" entries that point outside the project (directly or via a
   //    symlink) are never read — but say so instead of quietly scanning
@@ -483,11 +503,35 @@ function scan(projectRoot) {
   for (const aiFolder of AI_FOLDERS) {
     const inPublish = publishFiles.filter(f => f.startsWith(aiFolder + '/') || f === aiFolder);
     if (inPublish.length > 0) {
+      // npm pack succeeded but confirms only SOME (or none) of these paths →
+      // the rest are only here via our own (broader, safety-first) emulation
+      // — could be git-tracked-then-ignored, or simply untracked and excluded
+      // by npm for an unrelated reason (e.g. npm's own unanchored `.npmrc`
+      // rule) that our emulation doesn't replicate. Either way real npm won't
+      // publish them, so don't claim "уйдёт в npm-пакет" — but also don't
+      // claim "отслеживается в git"/"убери из истории git" as fact, since we
+      // don't actually know the file was ever committed. Count both groups
+      // separately rather than a single any()-check, or a folder with even
+      // one npm-confirmed file would claim the whole folder ships via npm.
+      let detail;
+      if (npmPackSucceeded) {
+        const npmCount = inPublish.filter((f) => npmConfirmedFiles.has(f)).length;
+        const gitOnlyCount = inPublish.length - npmCount;
+        if (npmCount === 0) {
+          detail = `Папка AI-инструмента не уйдёт через npm publish (${inPublish.length} файлов), но остаётся в проекте и может раскрыться другим путём — например при git push, если файлы уже закоммичены. Добавь в .gitignore; если уже коммитились — убери из истории git.`;
+        } else if (gitOnlyCount === 0) {
+          detail = `Папка AI-инструмента попадёт в ${context} (${inPublish.length} файлов). Добавь в .npmignore/.gitignore.`;
+        } else {
+          detail = `Папка AI-инструмента: ${npmCount} файлов попадёт в npm-пакет, ещё ${gitOnlyCount} npm publish не включит, но они остаются в проекте и могут раскрыться другим путём (например git push, если уже закоммичены). Добавь в .npmignore/.gitignore; если уже коммитились — убери из истории git.`;
+        }
+      } else {
+        detail = `Папка AI-инструмента попадёт в ${context} (${inPublish.length} файлов). Добавь в .npmignore/.gitignore.`;
+      }
       findings.push({
         severity: 'HIGH',
         type: 'ai_folder_in_publish',
         file: aiFolder + '/',
-        detail: `Папка AI-инструмента попадёт в ${context} (${inPublish.length} файлов). Добавь в .npmignore/.gitignore.`,
+        detail,
       });
     }
   }
@@ -499,12 +543,21 @@ function scan(projectRoot) {
 
     const inPublish = publishFiles.includes(secretFile);
     if (inPublish) {
-      // File WILL be published — CRITICAL, scan content too
+      // Same reasoning as section 1 above: only relabel the channel when npm
+      // pack ran successfully and positively excluded this exact file — and
+      // even then, don't assert it's git-tracked as fact (it might only be
+      // untracked-and-excluded-by-npm-for-an-unrelated-reason), just that
+      // npm publish won't be the leak path.
+      const npmConfirms = npmConfirmedFiles.has(secretFile);
+      const detail = (npmPackSucceeded && !npmConfirms)
+        ? 'Этот файл содержит API-ключи и токены — npm publish его не включит, но он остаётся в проекте и может раскрыться другим путём (например git push, если уже закоммичен). Добавь в .gitignore; если уже коммитился — убери из истории git.'
+        : `Этот файл содержит API-ключи и токены — он уйдёт в ${context}!`;
+      // File WILL be published or leaked — CRITICAL, scan content too
       findings.push({
         severity: 'CRITICAL',
         type: 'ai_secret_file_published',
         file: secretFile,
-        detail: `Этот файл содержит API-ключи и токены — он уйдёт в ${context}!`,
+        detail,
       });
       const content = safeRead(full);
       if (content) {

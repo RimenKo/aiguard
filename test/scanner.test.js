@@ -268,6 +268,68 @@ test('npm project, "files" field set without README.md: secret in README.md IS p
   );
 });
 
+// ── npm-confirmed vs git-only: message must name the real leak channel ──
+// A file caught ONLY via the git-tracked-then-later-ignored emulation path
+// (getGitTrackedFiles) really will leak — but through `git push`, since real
+// npm treats .gitignore as pure pattern exclusion and doesn't consult git
+// tracking (verified separately against npm-packlist's own source). Saying
+// "will be published to npm" about a file npm itself excludes is wrong about
+// the channel, even though flagging it at all is correct.
+test('AI secret file (CLAUDE.md) caught only via git-tracking, not confirmed by npm: message names git, not npm', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-git-only', version: '1.0.0' }));
+  writeFile(dir, 'CLAUDE.md', `API key: ${FAKE_SECRET}\n`);
+  git(dir, ['add', 'package.json', 'CLAUDE.md']);
+  // Added to .gitignore AFTER CLAUDE.md was already tracked — real npm pack
+  // excludes it (pure .gitignore pattern match, no tracked-file exception),
+  // but git still carries it in history and will expose it on push.
+  writeFile(dir, '.gitignore', 'CLAUDE.md\n');
+
+  const findings = scanIsolated(dir);
+  const published = findings.filter((f) => f.type === 'ai_secret_file_published' && f.file === 'CLAUDE.md');
+  assert.strictEqual(published.length, 1, 'must still flag CLAUDE.md — it really does leak, just via git, not npm');
+  assert.match(
+    published[0].detail, /git push/,
+    'message must name the actual leak channel (git push), not "уйдёт в npm-пакет" — real npm excludes this file'
+  );
+  assert.doesNotMatch(
+    published[0].detail, /уйдёт в npm-пакет/,
+    'must not claim npm will publish a file npm pack itself confirmed it excludes'
+  );
+});
+
+// ── mixed AI folder: part npm-confirmed, part git-only ──────────────────
+// A folder where SOME files are really published by npm and others are only
+// exposed via git tracking must report both counts/channels separately — an
+// any()-based check would let one npm-confirmed file make the whole folder
+// look npm-only, silently dropping the "remove from git history" advice the
+// git-only files actually need.
+test('mixed AI folder (.claude/): one file npm-confirmed, one git-only — message reports both channels', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-mixed-folder', version: '1.0.0' }));
+  writeFile(dir, '.claude/keep.json', '{}');
+  writeFile(dir, '.claude/hidden.json', '{}');
+  git(dir, ['add', 'package.json', '.claude/keep.json', '.claude/hidden.json']);
+  // Only hidden.json gets excluded from real npm — it's already git-tracked
+  // (staged before this rule existed), so git still carries it regardless.
+  // keep.json matches no ignore pattern, so npm confirms it too.
+  writeFile(dir, '.gitignore', '.claude/hidden.json\n');
+
+  const findings = scanIsolated(dir);
+  const folderFinding = findings.find((f) => f.type === 'ai_folder_in_publish' && f.file === '.claude/');
+  assert.ok(folderFinding, 'expected a finding for the .claude/ folder');
+  assert.match(
+    folderFinding.detail, /1 файлов попадёт в npm-пакет/,
+    'must report the npm-confirmed count separately, not fold it into "everything is git-only"'
+  );
+  assert.match(
+    folderFinding.detail, /ещё 1 npm publish не включит/,
+    'must report the npm-excluded count separately, not fold it into "everything ships via npm"'
+  );
+});
+
 // ── npm pack itself unavailable — graceful fallback, not a crash or a gap ──
 test('npm unavailable (stripped PATH): scan() falls back to emulation and warns, does not crash', () => {
   const dir = makeTempProject(); // no git — isGitRepo() will just report false
