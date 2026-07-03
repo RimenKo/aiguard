@@ -127,10 +127,18 @@ function getNpmPackFiles(projectRoot, errorDetail) {
   }
 
   let parsed;
-  try { parsed = JSON.parse(output); } catch (_) { return null; }
+  try {
+    parsed = JSON.parse(output);
+  } catch (_) {
+    if (errorDetail) errorDetail.push('npm pack вернул невалидный JSON');
+    return null;
+  }
 
   const manifest = Array.isArray(parsed) ? parsed[0] : null;
-  if (!manifest || !Array.isArray(manifest.files)) return null;
+  if (!manifest || !Array.isArray(manifest.files)) {
+    if (errorDetail) errorDetail.push('npm pack вернул JSON неожиданной формы (нет манифеста с полем "files")');
+    return null;
+  }
 
   return manifest.files
     .filter((f) => f && typeof f.path === 'string')
