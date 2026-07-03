@@ -6,159 +6,41 @@ const { AI_FOLDERS, AI_SECRET_FILES, SECRET_PATTERNS } = require('./patterns');
 
 /**
  * Returns list of files that will be included in npm publish.
- * Respects .npmignore and package.json "files" field.
+ * Union of two real sources of truth: `git ls-files` (what git tracks / would
+ * `git push`) and `npm pack --dry-run --json` (what npm would actually
+ * publish). No hand-rolled .gitignore/.npmignore parsing — both commands
+ * already implement their own exclusion rules correctly (including the
+ * package.json "files" field, which npm applies natively), so re-deriving
+ * either ourselves only adds a second, worse copy of logic that already
+ * exists and is exactly right.
  */
+
 // npm never publishes these regardless of .npmignore/.gitignore/git tracking —
 // they're excluded from the packed tarball unconditionally. A git-tracked (or
 // merely untracked-and-unignored) node_modules would otherwise ride along
-// through getAllFilesGitAware()'s union and get reported as "will be
-// published", which isn't true and just trains the user to distrust findings.
+// through the git-sourced half of the union below and get reported as "will
+// be published", which isn't true and just trains the user to distrust
+// findings.
+//
+// Only ever applied to the git-sourced half of the union, never to npm's own
+// manifest: verified against npm-packlist's own source, npm's default rule
+// for these two names is anchored ("/node_modules"), i.e. it only excludes
+// them at the project ROOT — a nested node_modules/ (e.g. a vendored
+// src/node_modules/) is real, publishable content as far as npm is
+// concerned. Filtering npm's own confirmed output here would wrongly drop
+// that. Over-filtering the git side is the safe direction to err in: it's
+// merely our own supplementary source, and anything real npm actually
+// publishes gets added back by the union regardless.
 const NPM_NEVER_PUBLISHED = ['node_modules', '.git'];
 
-// Per-segment match, not prefix match — npm excludes node_modules/.git at
-// ANY depth (e.g. a vendored src/node_modules/), not just at project root.
-// Splitting on both separators covers paths already normalized to path.sep
-// as well as the rare literal '/' that slips through.
+// Per-segment match, not prefix match, for the same reason NPM_NEVER_PUBLISHED
+// is only ever applied to the git-sourced half of the union (real npm's own
+// root-anchored rule is applied by npm itself, not here). Splitting on both
+// separators covers paths already normalized to path.sep as well as the rare
+// literal '/' that slips through.
 function isUnderAnyDir(relPath, dirNames) {
   const segments = relPath.split(/[\\/]/);
   return dirNames.some((d) => segments.includes(d));
-}
-
-// `skipped`, if passed, collects "files" entries that were dropped because they
-// (or their symlink target) resolve outside projectRoot — so the caller can
-// warn instead of silently scanning less than it claims to.
-// `gitWarnings`, if passed, collects human-readable notices when git-aware
-// file discovery (see getAllFilesGitAware below) couldn't complete.
-// `npmWarnings`, if passed, collects a notice when `npm pack --dry-run`
-// itself couldn't complete (see getNpmPackFiles below).
-//
-// Strategy: compute our own emulated publish list first (unchanged from
-// before), then UNION it with the exact manifest `npm pack --dry-run --json`
-// reports — never replace. Emulation and npm's real packer each catch things
-// the other misses:
-//   - npm's manifest is the only one that knows about npm's own always-ignore
-//     defaults + always-include specials (package.json/README/LICENSE), and
-//     doesn't hardcode "dist" as excluded the way buildIgnoreList() does — so
-//     it catches a secret in dist/ (published for real, but hidden from our
-//     emulation) or in package.json/README when "files" is set but doesn't
-//     list them (npm still publishes them unconditionally).
-//   - our emulation is the only one that consults git tracking directly
-//     (getGitTrackedFiles), which is how it catches a file that was committed
-//     before a later .gitignore rule excluded it — real `npm pack` (this npm
-//     version) treats .gitignore as pure glob-exclusion and does NOT consult
-//     git tracking, so it misses that case on its own.
-// Unioning keeps both catches; the only cost is scanning a few paths that
-// won't actually end up in the tarball, which is the safe direction to err
-// in for a leak scanner.
-// `npmConfirmed`, if passed, gets every path npm's own manifest actually
-// listed (NFC-normalized) — so the caller can tell "npm itself will publish
-// this" apart from "only our own git/ignore-based emulation thinks so". That
-// distinction matters for messaging: a file caught ONLY through the
-// git-tracked-then-later-ignored path (see getGitTrackedFiles) really will
-// leak, but via `git push`, not `npm publish` — saying "will be published to
-// npm" about it is factually wrong about the channel, even though flagging
-// it at all is correct.
-function getPublishFiles(projectRoot, skipped, gitWarnings, npmWarnings, npmConfirmed) {
-  // Read package.json
-  const pkgPath = path.join(projectRoot, 'package.json');
-  if (!fs.existsSync(pkgPath)) return [];
-
-  let pkg = {};
-  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch (_) {}
-
-  let emulated;
-  if (pkg.files && Array.isArray(pkg.files) && pkg.files.length > 0) {
-    // If "files" field is set — only those are published
-    emulated = expandGlobs(pkg.files, projectRoot, skipped);
-  } else {
-    // Otherwise everything except .npmignore / .gitignore exclusions
-    const files = getAllFilesGitAware(projectRoot, buildIgnoreList(projectRoot), gitWarnings);
-    emulated = files.filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
-  }
-
-  const npmErrorDetail = [];
-  const npmFiles = getNpmPackFiles(projectRoot, npmErrorDetail);
-  if (npmFiles === null) {
-    if (npmWarnings) {
-      const reason = npmErrorDetail[0] ? ` Причина: ${npmErrorDetail[0]}` : '';
-      npmWarnings.push(`Команда "npm pack --dry-run" не отработала (npm недоступен, таймаут, невалидный package.json или другая ошибка самого npm) — список публикуемых файлов эмулируется вручную и может разойтись с тем, что реально отправит npm publish (например secret в dist/, или package.json/README при заданном "files").${reason}`);
-    }
-    return emulated;
-  }
-
-  // Same NFC-normalizing merge getAllFilesGitAware() uses above, for the same
-  // reason: the two lists must compare byte-for-byte per file or the Set
-  // fails to de-duplicate a name that differs only in Unicode normalization
-  // form between npm's output and our own fs walk.
-  const npmFilesNFC = npmFiles.map((f) => f.normalize('NFC'));
-  if (npmConfirmed) {
-    for (const f of npmFilesNFC) npmConfirmed.add(f);
-  }
-
-  const merged = new Set(emulated.map((f) => f.normalize('NFC')));
-  for (const f of npmFilesNFC) merged.add(f);
-  return Array.from(merged);
-}
-
-function buildIgnoreList(projectRoot) {
-  const defaultIgnore = [
-    'node_modules', '.git', '.DS_Store', '*.log',
-    'coverage', 'dist', '.nyc_output',
-  ];
-
-  const npmIgnorePath = path.join(projectRoot, '.npmignore');
-  const gitIgnorePath = path.join(projectRoot, '.gitignore');
-
-  let lines = [...defaultIgnore];
-  if (fs.existsSync(npmIgnorePath)) {
-    lines = lines.concat(readIgnoreFile(npmIgnorePath));
-  } else if (fs.existsSync(gitIgnorePath)) {
-    lines = lines.concat(readIgnoreFile(gitIgnorePath));
-  }
-  return lines.filter(Boolean);
-}
-
-function readIgnoreFile(filePath) {
-  return fs.readFileSync(filePath, 'utf8')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(l => l && !l.startsWith('#'));
-}
-
-function getAllFiles(startDir, ignoreList, base) {
-  base = base || startDir;
-  const results = [];
-  const visited = new Set();
-  // Итеративный обход — без рекурсии, не упирается в лимит стека
-  const queue = [startDir];
-
-  while (queue.length > 0) {
-    const dir = queue.pop();
-    let entries;
-    try { entries = fs.readdirSync(dir); } catch (_) { continue; }
-
-    for (const entry of entries) {
-      const full = path.join(dir, entry);
-      const rel  = path.relative(base, full);
-
-      if (isIgnored(rel, entry, ignoreList)) continue;
-
-      let stat;
-      try { stat = fs.lstatSync(full); } catch (_) { continue; }
-      if (stat.isSymbolicLink()) continue;
-
-      if (stat.isDirectory()) {
-        let realPath;
-        try { realPath = fs.realpathSync(full); } catch (_) { continue; }
-        if (visited.has(realPath)) continue;
-        visited.add(realPath);
-        queue.push(full);
-      } else {
-        results.push(rel);
-      }
-    }
-  }
-  return results;
 }
 
 // 10s is generous for listing paths (as opposed to scanGitHistory's diff
@@ -185,15 +67,13 @@ function isGitRepo(projectRoot) {
 
 // Returns the files git actually knows about — tracked files plus untracked
 // files that aren't excluded — or null if the `git ls-files` call itself
-// failed (huge output, timeout, permissions). Unlike buildIgnoreList() +
-// isIgnored() above, this asks git directly, so it gets two things right
-// that the hand-rolled parser can't: a file committed before it was added to
-// .gitignore stays tracked (git never re-applies ignore rules retroactively),
-// and "!pattern" negation lines work exactly like real git, since git's own
-// exclude engine evaluates them instead of our regex-based isIgnored().
-// Paths are normalized to path.sep — git always prints '/', but getAllFiles()
-// above returns path.relative()'s native separator, and the two lists must
-// compare equal for the Set-based merge below to actually de-duplicate.
+// failed (huge output, timeout, permissions, corrupted index). This is the
+// FIRST of the two sources of truth this file relies on: git's own exclude
+// engine evaluates .gitignore (including "!pattern" negation) exactly like a
+// real `git push` would, and a file committed before a later .gitignore rule
+// excluded it stays tracked (git never re-applies ignore rules
+// retroactively) — both cases a hand-rolled ignore-file parser gets wrong.
+// Paths are normalized to path.sep — git always prints '/'.
 function getGitTrackedFiles(projectRoot) {
   const { execFileSync } = require('child_process');
   try {
@@ -257,128 +137,61 @@ function getNpmPackFiles(projectRoot, errorDetail) {
     .map((f) => f.path.split('/').join(path.sep));
 }
 
-// Wraps getAllFiles() with getGitTrackedFiles() so a git-tracked or
-// negation-un-ignored file is never silently dropped by the hand-rolled
-// ignore parser. Falls back to the plain ignore-based list, unchanged, when
-// projectRoot isn't a git repository — same result as before this function
-// existed. `warnings`, if passed, collects a notice for the one case that
-// fails silently otherwise: projectRoot IS a git repo, but `git ls-files`
-// itself errored out (huge repo, timeout) — the scan still completes, just
-// without git's extra coverage, and the caller can surface that instead of
-// quietly looking as thorough as a successful run.
-function getAllFilesGitAware(projectRoot, ignoreList, warnings) {
-  const ignoreBasedFiles = getAllFiles(projectRoot, ignoreList);
-  if (!isGitRepo(projectRoot)) return ignoreBasedFiles;
+// Wraps getGitTrackedFiles() with the one filter that isn't about exclusion
+// rules at all: dropping a tracked path that is itself a symlink, so its
+// target is only ever reached and scanned through its OWN tracked entry.
+// Without this, a git-tracked symlink to another tracked file would report
+// that file's secret twice — once per name.
+//
+// Known accepted trade-off: if the symlink's target is itself excluded from
+// this file list (e.g. gitignored, so it never gets its own entry),
+// filtering the symlink out here means a secret reachable ONLY through that
+// symlink goes unscanned. That's intentional, not a regression: only the
+// symlink's target-path STRING is ever committed/published, never the
+// target's content, so nothing actually leaks this way — flagging it would
+// have produced a false "will be published" HIGH instead. Properly telling
+// "target excluded but harmless" apart from "target excluded and genuinely
+// at risk" would need following the symlink and re-checking its target
+// against the full source-of-truth union, which is out of scope here.
+//
+// Returns null when there's nothing usable to report: either projectRoot
+// isn't a git repository at all (normal — e.g. before `git init`, no warning
+// needed), or it is one but `git ls-files` itself failed (abnormal — the
+// repo is there but broken, so `warnings`, if passed, gets a notice that
+// coverage just got worse instead of silently looking as thorough as a
+// clean run).
+function getGitFileList(projectRoot, warnings) {
+  if (!isGitRepo(projectRoot)) return null;
 
   const gitFiles = getGitTrackedFiles(projectRoot);
   if (gitFiles === null) {
     if (warnings) {
-      warnings.push('Это git-репозиторий, но команда "git ls-files" не отработала (таймаут или сбой) — файлы сверены только через разбор .gitignore/.npmignore, без списка git.');
+      warnings.push('Это git-репозиторий, но команда "git ls-files" не отработала (повреждённый индекс, таймаут или сбой) — вместо списка git используется полный обход папки проекта, без учёта .gitignore.');
     }
-    return ignoreBasedFiles;
+    return null;
   }
 
-  // Same invariant getAllFiles() already enforces above: a path that is
-  // itself a symlink is never in the list, so its target (if inside root)
-  // is only ever reached and scanned through its OWN tracked path. Without
-  // this, a git-tracked symlink to another tracked file would report that
-  // file's secret twice — once per name — since resolveWithinRoot() follows
-  // the symlink and reads the same underlying content section 3 already
-  // reads for the target's own entry.
-  //
-  // Known accepted trade-off: if the symlink's target is itself excluded
-  // from this file list (e.g. gitignored, so it never gets its own entry),
-  // filtering the symlink out here means a secret reachable ONLY through
-  // that symlink goes unscanned. That's intentional, not a regression: only
-  // the symlink's target-path STRING is ever committed/published, never the
-  // target's content, so nothing actually leaks — the previous behavior of
-  // scanning through it produced a false "will be published" HIGH instead.
-  // Properly telling "target excluded but harmless" apart from "target
-  // excluded and genuinely at risk" needs the full source-of-truth merge
-  // that's explicitly out of scope here (tracked as a follow-up).
-  const gitFilesNoSymlinks = gitFiles.filter((f) => {
+  return gitFiles.filter((f) => {
     try {
       return !fs.lstatSync(path.join(projectRoot, f)).isSymbolicLink();
     } catch (_) {
       return true; // gone since git listed it — let safeRead()'s own try/catch handle the miss
     }
   });
-
-  // Both lists must compare byte-for-byte for the same file, or the Set
-  // below silently fails to de-duplicate it: git normalizes filenames to
-  // NFC, but fs.readdirSync() (used by getAllFiles above) can return NFD
-  // for the very same name — common on macOS for names with combining
-  // accents (e.g. a Cyrillic "й" or "café.js"). Composing both to NFC
-  // before merging keeps one file as one entry; reading the NFC-composed
-  // path still works even when the on-disk name is NFD, since macOS
-  // filesystems resolve lookups Unicode-normalization-insensitively.
-  //
-  // Known accepted risk, macOS-only tool: on a byte-exact filesystem
-  // (ext4/Linux) two files whose names are canonically equivalent but
-  // byte-distinct (one NFC, one NFD) can legitimately coexist — normalizing
-  // both to NFC would collapse them into one Set entry and silently drop
-  // the other from the scan. Not fixed here: on this project's actual
-  // target (macOS/APFS), the two forms can't coexist as separate files at
-  // all (confirmed empirically — writing both forms to the same directory
-  // yields a single file), so there is no environment here to construct or
-  // verify a fix against. A real fix would key de-duplication by inode
-  // (fs.lstatSync().ino) instead of by name string.
-  const merged = new Set(ignoreBasedFiles.map((f) => f.normalize('NFC')));
-  for (const f of gitFilesNoSymlinks) merged.add(f.normalize('NFC'));
-  return Array.from(merged);
-}
-
-// Converts a gitignore/npmignore glob pattern to a RegExp.
-// Supports: * (within dir), ** (any depth), ? (single char), no {brace} expansion.
-function globToRegex(pattern) {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-  const regexStr = escaped
-    .replace(/\*\*/g, '.*')      // ** = any path including slashes
-    .replace(/\*/g,  '[^/]*')    // *  = any chars except slash
-    .replace(/\?/g,  '[^/]');    // ?  = one char except slash
-  return new RegExp('^' + regexStr + '$');
-}
-
-function isIgnored(rel, name, ignoreList) {
-  return ignoreList.some(pattern => {
-    if (!pattern || pattern.startsWith('#') || pattern.startsWith('!')) return false;
-
-    const anchored  = pattern.startsWith('/');
-    const p         = anchored ? pattern.slice(1) : pattern;
-    const dirOnly   = p.endsWith('/');
-    const cleanPat  = dirOnly ? p.slice(0, -1) : p;
-
-    if (/[*?]/.test(cleanPat)) {
-      const re = globToRegex(cleanPat);
-      if (anchored) return re.test(rel) || re.test(rel.split('/')[0]);
-      // Non-anchored glob: match against basename OR full relative path
-      return re.test(name) || re.test(rel);
-    }
-
-    // Exact / prefix match
-    if (anchored) return rel === cleanPat || rel.startsWith(cleanPat + '/');
-    return name === cleanPat || rel === cleanPat || rel.startsWith(cleanPat + '/');
-  });
 }
 
 // Resolves `relPath` against `root` and returns the absolute path only if it
-// stays inside root. Blocks package.json "files" entries like "../../.env"
-// from making the scanner read (and print) files outside the project.
-// Also rejects a path whose real target (after resolving symlinks) escapes
-// root — a symlink checked into the project can point outside it.
+// stays inside root. Defense in depth for section 3 in scan() below:
+// publishFiles comes from git/npm's own output, which shouldn't ever contain
+// a traversal, but this guards against reading (and printing) a file
+// outside the project if it somehow did. Also rejects a path whose real
+// target (after resolving symlinks) escapes root.
 //
 // `root` itself is resolved through realpath too, not just `full` — on
 // macOS/Linux common roots like /tmp are themselves symlinks (/tmp ->
 // /private/tmp). Comparing a lexical root against a realpath'd file would
 // make every file look like it escapes root, silently dropping the whole
 // project from the scan.
-//
-// Shared with expandGlobs(), which needs the same real root as the `base`
-// it hands to getAllFiles() — mixing a lexical base with a realpath'd
-// startDir makes path.relative() emit "../.." garbage for every file in a
-// directory (e.g. a "files": ["src"] entry), which then fails the safety
-// check below and gets silently dropped, same failure as the root mismatch
-// this function exists to prevent.
 function realRootOf(root) {
   try {
     return fs.realpathSync(path.resolve(root));
@@ -407,43 +220,99 @@ function resolveWithinRoot(root, relPath) {
   return full;
 }
 
-function expandGlobs(patterns, root, skipped) {
-  const systemOnly = ['node_modules', '.git', '.DS_Store', 'coverage', 'dist', '.nyc_output'];
-
-  // If any entry is a glob, we can't resolve it without a glob library.
-  // Fall back to scanning the whole project — conservative but safe.
-  // Check ALL patterns first so we don't discard partially accumulated results.
-  if (patterns.some(p => /[*?{]/.test(p))) {
-    return getAllFiles(root, systemOnly, root);
-  }
-
+// Last-resort fallback for when NEITHER source of truth is available (see
+// getPublishFiles below) — deliberately NOT a re-implemented ignore-file
+// parser. It walks the whole tree, skipping only the two directories npm
+// categorically never publishes at the root (see NPM_NEVER_PUBLISHED), and
+// nothing else: no .gitignore/.npmignore parsing, no "files" field
+// emulation, no glob matching. Scanning too much (e.g. a gitignored build
+// artifact that wouldn't really publish) is the safe direction to err in
+// for a leak scanner — silently scanning too little, the way a
+// half-correct ignore-file emulation risks, is not.
+function walkAllFiles(startDir, base) {
+  base = base || startDir;
   const results = [];
-  for (const pattern of patterns) {
-    const full = resolveWithinRoot(root, pattern);
-    if (!full) {
-      // Escapes project root (literal "../", absolute path, or a symlink
-      // pointing outside) — refuse to read it, same as npm would refuse to
-      // publish it. Record it so scan() can surface a warning instead of
-      // silently scanning less than package.json claims to publish.
-      if (skipped) skipped.push(pattern);
-      continue;
-    }
+  const visited = new Set();
+  // Итеративный обход — без рекурсии, не упирается в лимит стека
+  const queue = [startDir];
 
-    let stat;
-    try { stat = fs.statSync(full); } catch (_) { continue; } // gone between existsSync and statSync, or unreadable
+  while (queue.length > 0) {
+    const dir = queue.pop();
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch (_) { continue; }
 
-    if (stat.isDirectory()) {
-      // `full` is already real (resolveWithinRoot resolved it through
-      // realpath) — `base` must be real too, or path.relative(base, entry)
-      // emits "../.." garbage for every file whenever `root` is reached
-      // through a symlinked ancestor, and those files get silently dropped
-      // downstream instead of ending up in the scan.
-      results.push(...getAllFiles(full, [], realRootOf(root)));
-    } else {
-      results.push(pattern);
+    for (const entry of entries) {
+      if (entry === 'node_modules' || entry === '.git') continue;
+
+      const full = path.join(dir, entry);
+      const rel  = path.relative(base, full);
+
+      let stat;
+      try { stat = fs.lstatSync(full); } catch (_) { continue; }
+      if (stat.isSymbolicLink()) continue;
+
+      if (stat.isDirectory()) {
+        let realPath;
+        try { realPath = fs.realpathSync(full); } catch (_) { continue; }
+        if (visited.has(realPath)) continue;
+        visited.add(realPath);
+        queue.push(full);
+      } else {
+        results.push(rel);
+      }
     }
   }
   return results;
+}
+
+// `gitWarnings`, if passed, collects a notice when git-aware file discovery
+// (see getGitFileList above) couldn't complete.
+// `npmWarnings`, if passed, collects a notice when `npm pack --dry-run`
+// itself couldn't complete (see getNpmPackFiles above).
+// `npmConfirmed`, if passed, gets every path npm's own manifest actually
+// listed (NFC-normalized) — so the caller can tell "npm itself will publish
+// this" apart from "only git tracks this". That distinction matters for
+// messaging: a file caught ONLY through git tracking really will leak, but
+// via `git push`, not `npm publish` — saying "will be published to npm"
+// about it is factually wrong about the channel, even though flagging it at
+// all is correct. This also naturally covers the case where .npmignore
+// excludes a file that's git-tracked anyway (e.g. via `git add -f`): npm's
+// own manifest won't confirm it, so it correctly ends up reported as
+// git-only, never as "will publish to npm".
+function getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmed) {
+  const rawGitFiles = getGitFileList(projectRoot, gitWarnings);
+  const gitFiles = (rawGitFiles || []).filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
+
+  const npmErrorDetail = [];
+  const npmFiles = getNpmPackFiles(projectRoot, npmErrorDetail);
+
+  if (npmFiles === null) {
+    if (npmWarnings) {
+      const reason = npmErrorDetail[0] ? ` Причина: ${npmErrorDetail[0]}` : '';
+      npmWarnings.push(`Команда "npm pack --dry-run" не отработала (npm недоступен, таймаут, невалидный package.json или другая ошибка самого npm) — вместо точного списка публикации используется полный обход папки проекта (без учёта .npmignore и "files"), чтобы не пропустить секрет из-за деградации источника.${reason}`);
+    }
+    const fallbackFiles = walkAllFiles(projectRoot).filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
+    // Both lists must compare byte-for-byte per file, or the Set below fails
+    // to de-duplicate a name that differs only in Unicode normalization
+    // form: git normalizes to NFC, but fs.readdirSync() (used by
+    // walkAllFiles) can return NFD for the same name — common on macOS for
+    // names with combining accents (e.g. "café.js").
+    const merged = new Set(gitFiles.map((f) => f.normalize('NFC')));
+    for (const f of fallbackFiles) merged.add(f.normalize('NFC'));
+    return Array.from(merged);
+  }
+
+  // Same NFC-normalizing merge as the fallback branch above, for the same
+  // reason: npm's output and git's output must compare byte-for-byte per
+  // file for the Set to actually de-duplicate.
+  const npmFilesNFC = npmFiles.map((f) => f.normalize('NFC'));
+  if (npmConfirmed) {
+    for (const f of npmFilesNFC) npmConfirmed.add(f);
+  }
+
+  const merged = new Set(gitFiles.map((f) => f.normalize('NFC')));
+  for (const f of npmFilesNFC) merged.add(f);
+  return Array.from(merged);
 }
 
 /**
@@ -456,15 +325,18 @@ function scan(projectRoot) {
   const pkgPath = path.join(projectRoot, 'package.json');
   const isNpmProject = fs.existsSync(pkgPath);
 
-  // For npm projects: only files that will be published.
-  // For other projects (Python, Go, etc.): all non-gitignored files.
-  const skippedFiles = [];
+  // For npm projects: only files that will be published (git ∪ npm pack).
+  // For other projects (Python, Go, etc.): whatever git tracks (would `git push`).
   const gitWarnings = [];
   const npmWarnings = [];
   const npmConfirmedFiles = new Set();
-  const publishFiles = isNpmProject
-    ? getPublishFiles(projectRoot, skippedFiles, gitWarnings, npmWarnings, npmConfirmedFiles)
-    : getAllFilesGitAware(projectRoot, buildIgnoreList(projectRoot), gitWarnings);
+  let publishFiles;
+  if (isNpmProject) {
+    publishFiles = getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmedFiles);
+  } else {
+    const gitFiles = getGitFileList(projectRoot, gitWarnings);
+    publishFiles = gitFiles !== null ? gitFiles : walkAllFiles(projectRoot);
+  }
 
   const context = isNpmProject ? 'npm-пакет' : 'git-коммит';
   // True only when npm pack --dry-run itself succeeded — i.e. npmConfirmedFiles
@@ -474,27 +346,15 @@ function scan(projectRoot) {
   // "we don't know".
   const npmPackSucceeded = isNpmProject && npmWarnings.length === 0;
 
-  // 0. "files" entries that point outside the project (directly or via a
-  //    symlink) are never read — but say so instead of quietly scanning
-  //    less than package.json claims to publish.
-  for (const pattern of skippedFiles) {
-    findings.push({
-      severity: 'WARN',
-      type: 'files_entry_outside_root',
-      file: pattern,
-      detail: `Путь "${pattern}" в package.json "files" ведёт за пределы папки проекта (напрямую или через симлинк) — aiguard его НЕ прочитал. Если это ожидаемо (например ссылка на общий пакет в монорепозитории) — проверь его содержимое отдельно.`,
-    });
-  }
-
-  // 0b. git-aware file discovery didn't fully complete — say so instead of
-  //     silently looking as thorough as a normal run (see getAllFilesGitAware).
+  // 0. git-aware file discovery didn't fully complete — say so instead of
+  //    silently looking as thorough as a normal run (see getGitFileList).
   for (const detail of gitWarnings) {
     findings.push({ severity: 'WARN', type: 'git_awareness_degraded', file: '.', detail });
   }
 
-  // 0c. `npm pack --dry-run` itself didn't complete — say so instead of
-  //     silently relying on our own emulation without flagging the gap
-  //     (see getNpmPackFiles / getPublishFiles).
+  // 0b. `npm pack --dry-run` itself didn't complete — say so instead of
+  //     silently relying on a full-directory fallback without flagging the
+  //     gap (see getNpmPackFiles / getPublishFiles).
   for (const detail of npmWarnings) {
     findings.push({ severity: 'WARN', type: 'npm_pack_degraded', file: '.', detail });
   }
@@ -504,10 +364,10 @@ function scan(projectRoot) {
     const inPublish = publishFiles.filter(f => f.startsWith(aiFolder + '/') || f === aiFolder);
     if (inPublish.length > 0) {
       // npm pack succeeded but confirms only SOME (or none) of these paths →
-      // the rest are only here via our own (broader, safety-first) emulation
-      // — could be git-tracked-then-ignored, or simply untracked and excluded
-      // by npm for an unrelated reason (e.g. npm's own unanchored `.npmrc`
-      // rule) that our emulation doesn't replicate. Either way real npm won't
+      // the rest are only here via the git-sourced half of the union — could
+      // be git-tracked-then-ignored, or simply untracked and excluded by npm
+      // for an unrelated reason (e.g. npm's own unanchored `.npmrc` rule)
+      // that git tracking alone doesn't tell us. Either way real npm won't
       // publish them, so don't claim "уйдёт в npm-пакет" — but also don't
       // claim "отслеживается в git"/"убери из истории git" as fact, since we
       // don't actually know the file was ever committed. Count both groups
