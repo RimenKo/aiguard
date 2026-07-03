@@ -189,7 +189,28 @@ const SECRET_PATTERNS = [
   // ── Generic catch-all ─────────────────────────────────────────
   {
     name: 'Generic secret in env',
-    regex: /(?:PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY|ACCESS_KEY|AUTH_KEY)\s*[=:]\s*["']?[^\s"']{8,}["']?/gi,
+    // Value: a quoted string may contain spaces ("my super secret
+    // password"); an unquoted one may not — an unquoted value with spaces
+    // has no reliable end boundary and would swallow surrounding code.
+    regex: /(?:PASSWORD|SECRET|TOKEN)\s*[=:]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s"']{8,})/gi,
+  },
+  {
+    name: 'Generic secret key (*_KEY)',
+    // ANY compound *_KEY name (ENCRYPTION_KEY, SIGNING_KEY, STRIPE_KEY,
+    // SECRET_KEY, ...) — a fixed enum of key names always misses the next
+    // one a real project invents, so any_word_KEY is matched generically.
+    // Deliberately case-SENSITIVE (no /i) and unlike the pattern above:
+    // env-style secret names are conventionally UPPER_SNAKE_CASE, and
+    // matching case-insensitively would also flag ordinary lowercase code
+    // identifiers that just happen to end in _key (cache_key, primary_key,
+    // foreign_key, s3_object_key) as HIGH-severity leaks.
+    // {0,63} instead of an unbounded * — a bare `*` directly before a
+    // required literal means the engine backtracks through every possible
+    // split point when "_KEY" doesn't follow, which is O(n^2) on any long
+    // alphanumeric run with no underscore (measured: unbounded took ~6.9s
+    // on 80KB of hex-like text; {0,63} takes ~13ms on the same input while
+    // still matching every real key name, none of which are 60+ chars long).
+    regex: /[A-Z][A-Z0-9]{0,63}_KEY\s*[=:]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s"']{8,})/g,
   },
 
   // ── Base64-obfuscated secrets ──────────────────────────────────

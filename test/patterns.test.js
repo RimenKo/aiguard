@@ -11,6 +11,9 @@ assert.ok(mnemonicPattern, 'Crypto mnemonic (BIP39 seed) pattern not found in pa
 const numberedPattern = SECRET_PATTERNS.find((p) => p.name === 'Crypto mnemonic (numbered BIP39 seed)');
 assert.ok(numberedPattern, 'Crypto mnemonic (numbered BIP39 seed) pattern not found in patterns.js');
 
+const genericSecretPattern = SECRET_PATTERNS.find((p) => p.name === 'Generic secret in env');
+assert.ok(genericSecretPattern, 'Generic secret in env pattern not found in patterns.js');
+
 // 24 real BIP39 words picked from scattered positions in the official list —
 // NOT in canonical (alphabetical) order. A real mnemonic's word order comes
 // from random entropy, so fixtures must be scrambled too: a canonical-order
@@ -203,6 +206,91 @@ test('seed as a markdown asterisk list, one word per line', () => {
 test('seed as a bullet (•) list, one word per line', () => {
   const md = words(12).map((w) => `• ${w}`).join('\n');
   assert.strictEqual(detects(md), true);
+});
+
+// ── Generic secret patterns: PASSWORD/SECRET/TOKEN + any *_KEY name ────
+const genericKeyPattern = SECRET_PATTERNS.find((p) => p.name === 'Generic secret key (*_KEY)');
+assert.ok(genericKeyPattern, 'Generic secret key (*_KEY) pattern not found in patterns.js');
+
+function detectsGeneric(content) {
+  return detectsWith(genericSecretPattern, content);
+}
+function detectsKey(content) {
+  return detectsWith(genericKeyPattern, content);
+}
+
+test('ENCRYPTION_KEY (not in the old 7-word enum) is caught', () => {
+  assert.strictEqual(detectsKey('ENCRYPTION_KEY=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('SIGNING_KEY (not in the old 7-word enum) is caught', () => {
+  assert.strictEqual(detectsKey('SIGNING_KEY: abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('STRIPE_KEY (not in the old 7-word enum) is caught', () => {
+  assert.strictEqual(detectsKey('STRIPE_KEY=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('SECRET_KEY (compound word, not just standalone SECRET) is caught', () => {
+  assert.strictEqual(detectsKey('SECRET_KEY=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('previously enumerated API_KEY still caught (regression)', () => {
+  assert.strictEqual(detectsKey('API_KEY=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('previously enumerated PRIVATE_KEY still caught (regression)', () => {
+  assert.strictEqual(detectsKey('PRIVATE_KEY=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('standalone PASSWORD/SECRET/TOKEN (no _KEY suffix) still caught (regression)', () => {
+  assert.strictEqual(detectsGeneric('PASSWORD=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+  assert.strictEqual(detectsGeneric('SECRET=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+  assert.strictEqual(detectsGeneric('TOKEN=abcdef1234567890'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('double-quoted value with spaces is caught (*_KEY pattern)', () => {
+  assert.strictEqual(detectsKey('SECRET_KEY = "my super secret password"'), true);
+});
+
+test('single-quoted value with spaces is caught (PASSWORD/SECRET/TOKEN pattern)', () => {
+  assert.strictEqual(detectsGeneric("PASSWORD = 'my super secret password'"), true);
+});
+
+test('unquoted value with spaces is NOT caught (no reliable end boundary)', () => {
+  assert.strictEqual(detectsKey('SECRET_KEY = my super secret password'), false);
+});
+
+test('value under 8 chars is NOT caught (length floor unchanged)', () => {
+  assert.strictEqual(detectsKey('API_KEY=short'), false);
+});
+
+test('unrelated lowercase "key" without underscore is NOT caught (e.g. `const key = "..."`)', () => {
+  assert.strictEqual(detectsKey('const key = "abcdef1234567890";'), false); // gitleaks:allow — fake fixture, not a real key
+});
+
+// ── Round-2 fix: *_KEY must be case-sensitive (env-var convention only) ─
+// Found by an independent /validate reviewer: the first cut of this pattern
+// used the /i flag, so it also flagged ordinary lowercase code identifiers
+// that just happen to end in _key — not secrets at all.
+test('ordinary lowercase code identifiers ending in _key are NOT caught (false-positive fix)', () => {
+  assert.strictEqual(detectsKey('cache_key = "abcdefgh12345678"'), false); // gitleaks:allow — fake fixture, not a real key
+  assert.strictEqual(detectsKey('primary_key = "abcdefgh12345678"'), false); // gitleaks:allow — fake fixture, not a real key
+  assert.strictEqual(detectsKey('foreign_key = "abcdefgh12345678"'), false); // gitleaks:allow — fake fixture, not a real key
+  assert.strictEqual(detectsKey('s3_object_key = "abcdefgh12345678"'), false); // gitleaks:allow — fake fixture, not a real key
+});
+
+// ── Round-2 fix: ReDoS regression guard ─────────────────────────────────
+// Found by an independent /validate reviewer: the original `[A-Z][A-Z0-9]*_KEY`
+// (unbounded `*` directly before a required literal) backtracks O(n^2) on any
+// long alphanumeric run with no "_KEY" in it — measured ~6.9s on 80KB of
+// hex-like text before the {0,63} bound was added. This locks in the fix.
+test('long alphanumeric run with no _KEY does not cause catastrophic backtracking (ReDoS regression)', () => {
+  const hostile = 'A1'.repeat(40000); // 80,000 chars, no underscore anywhere
+  const start = Date.now();
+  detectsKey(hostile);
+  const elapsedMs = Date.now() - start;
+  assert.ok(elapsedMs < 500, `expected near-linear scan time (<500ms), took ${elapsedMs}ms`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -527,5 +527,129 @@ test('scanGitHistory: git log itself fails (corrupted branch ref) — visible wa
   assert.strictEqual(failed[0].severity, 'WARN');
 });
 
+// ── File size limit: a huge file must be skipped, fast, with a visible warning ─
+test('file over the size limit is skipped without scanning (fast, and a WARN names why)', () => {
+  const dir = makeTempProject();
+  // 6 MB of filler plus an embedded AWS key — the key must NOT be found:
+  // the file is skipped by size before it's ever read.
+  const bigContent = 'a'.repeat(6 * 1024 * 1024) + `\nconst key = "${FAKE_SECRET}";\n`;
+  writeFile(dir, 'huge.js', bigContent);
+
+  const start = Date.now();
+  const findings = scanIsolated(dir);
+  const elapsedMs = Date.now() - start;
+
+  assert.strictEqual(findingsFor(findings, 'huge.js').length, 0, 'oversized file must not be scanned for secrets');
+  assert.ok(elapsedMs < 500, `expected the skip to be fast (<500ms), took ${elapsedMs}ms`);
+  const tooLarge = findings.filter((f) => f.type === 'file_too_large' && f.file === 'huge.js');
+  assert.strictEqual(tooLarge.length, 1, 'expected a visible warning naming the skipped oversized file');
+  assert.strictEqual(tooLarge[0].severity, 'WARN');
+});
+
+// ── UTF-16: BOM'd text must be decoded and scanned, not treated as binary ──
+test('UTF-16 LE file (with BOM) is scanned as text, not skipped as binary', () => {
+  const dir = makeTempProject();
+  const content = `const key = "${FAKE_SECRET}";\n`;
+  const utf16Buf = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, 'utf16le')]);
+  fs.writeFileSync(path.join(dir, 'utf16le.js'), utf16Buf);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'utf16le.js').length, 1,
+    'a UTF-16 LE file with a BOM must be decoded and scanned, not silently treated as binary'
+  );
+});
+
+test('UTF-16 BE file (with BOM) is scanned as text, not skipped as binary', () => {
+  const dir = makeTempProject();
+  const content = `const key = "${FAKE_SECRET}";\n`;
+  const leBuf = Buffer.from(content, 'utf16le');
+  const beBuf = Buffer.alloc(leBuf.length);
+  for (let i = 0; i + 1 < leBuf.length; i += 2) {
+    beBuf[i] = leBuf[i + 1];
+    beBuf[i + 1] = leBuf[i];
+  }
+  const utf16Buf = Buffer.concat([Buffer.from([0xfe, 0xff]), beBuf]);
+  fs.writeFileSync(path.join(dir, 'utf16be.js'), utf16Buf);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'utf16be.js').length, 1,
+    'a UTF-16 BE file with a BOM must be decoded and scanned, not silently treated as binary'
+  );
+});
+
+test('a real binary file (null byte, no BOM) is still skipped — unaffected by the UTF-16 fix', () => {
+  const dir = makeTempProject();
+  const binBuf = Buffer.concat([Buffer.from([0x00, 0x01, 0x02, 0x03]), Buffer.from(`key=${FAKE_SECRET}`)]);
+  fs.writeFileSync(path.join(dir, 'blob.dat'), binBuf);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'blob.dat').length, 0,
+    'a genuine binary blob (no UTF-16 BOM) must still be skipped, not scanned as garbled text'
+  );
+});
+
+// ── Round-2 /validate fix: UTF-32 LE BOM must not be mis-read as UTF-16 ─
+// Found by an independent reviewer: a UTF-32 LE BOM (FF FE 00 00) shares its
+// first two bytes with UTF-16 LE's BOM (FF FE) — without checking the next
+// two bytes, a UTF-32 file got silently mis-decoded as garbled UTF-16 text.
+test('UTF-32 LE file (BOM FF FE 00 00) is not mis-decoded as UTF-16 — treated as binary like before', () => {
+  const dir = makeTempProject();
+  const content = `const key = "${FAKE_SECRET}";\n`;
+  const codepoints = Array.from(content).map((ch) => ch.codePointAt(0));
+  const utf32Buf = Buffer.alloc(4 + codepoints.length * 4);
+  utf32Buf.writeUInt8(0xff, 0);
+  utf32Buf.writeUInt8(0xfe, 1);
+  utf32Buf.writeUInt8(0x00, 2);
+  utf32Buf.writeUInt8(0x00, 3);
+  codepoints.forEach((cp, i) => utf32Buf.writeUInt32LE(cp, 4 + i * 4));
+  fs.writeFileSync(path.join(dir, 'utf32le.js'), utf32Buf);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'utf32le.js').length, 0,
+    'UTF-32 is out of scope (same as before this fix) — it must not be garbled into a false or missed match, just skipped as binary'
+  );
+});
+
+// ── Round-2 /validate fix: fail closed when size can't be confirmed ────
+// Found by an independent reviewer: if statSync() fails (returns null from
+// getFileSize) but readFileSync() would have succeeded, the old code fell
+// through to an unbounded read — defeating the whole point of the size
+// limit. safeRead() must now treat "size unknown" the same as "too big".
+test('safeRead fails closed when stat() cannot confirm size, even though the file is small and readable', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'stat-flaky.js', `const key = "${FAKE_SECRET}";`);
+  // scan() resolves paths through fs.realpathSync (resolveWithinRoot) before
+  // ever calling safeRead — on macOS the tmp dir itself is a symlink
+  // (/var/folders/... -> /private/var/folders/...), so the path safeRead
+  // actually stats is the REALPATH, not the raw path handed to writeFile().
+  const target = fs.realpathSync(path.join(dir, 'stat-flaky.js'));
+
+  const originalStatSync = fs.statSync;
+  fs.statSync = function (p, ...rest) {
+    if (p === target) {
+      const err = new Error('simulated stat failure');
+      err.code = 'EIO';
+      throw err;
+    }
+    return originalStatSync.call(fs, p, ...rest);
+  };
+
+  let findings;
+  try {
+    findings = scanIsolated(dir);
+  } finally {
+    fs.statSync = originalStatSync;
+  }
+
+  assert.strictEqual(
+    findingsFor(findings, 'stat-flaky.js').length, 0,
+    'when size cannot be confirmed, the file must be skipped rather than read unbounded'
+  );
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

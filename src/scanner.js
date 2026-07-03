@@ -443,6 +443,16 @@ function scan(projectRoot) {
     const full = path.join(projectRoot, secretFile);
     if (!fs.existsSync(full)) continue;
 
+    const secretFileSize = getFileSize(full);
+    if (secretFileSize !== null && secretFileSize > MAX_FILE_SIZE_BYTES) {
+      findings.push({
+        severity: 'WARN',
+        type: 'file_too_large',
+        file: secretFile,
+        detail: `Файл ${(secretFileSize / (1024 * 1024)).toFixed(1)} МБ — больше лимита в ${MAX_FILE_SIZE_BYTES / (1024 * 1024)} МБ, содержимое не проверено на секреты.`,
+      });
+    }
+
     const inPublish = publishFiles.includes(secretFile);
     if (inPublish) {
       // Same reasoning as section 1 above: only relabel the channel when npm
@@ -496,6 +506,18 @@ function scan(projectRoot) {
 
     const full = resolveWithinRoot(projectRoot, relFile);
     if (!full) continue; // defense in depth — publishFiles should already be root-safe
+
+    const fileSize = getFileSize(full);
+    if (fileSize !== null && fileSize > MAX_FILE_SIZE_BYTES) {
+      findings.push({
+        severity: 'WARN',
+        type: 'file_too_large',
+        file: relFile,
+        detail: `Файл ${(fileSize / (1024 * 1024)).toFixed(1)} МБ — больше лимита в ${MAX_FILE_SIZE_BYTES / (1024 * 1024)} МБ, пропущен без сканирования. Секреты внутри (если есть) не проверены.`,
+      });
+      continue;
+    }
+
     const content = safeRead(full);
     if (!content) continue;
 
@@ -571,11 +593,34 @@ function mask(value) {
   return value.slice(0, 6) + '***' + value.slice(-4);
 }
 
+// A well-formed secret is never megabytes long, so nothing is lost by the
+// size itself — this exists purely so a huge non-source file (data dump,
+// embedded binary misnamed .txt, etc.) can't stall the whole scan reading
+// and regex-matching it. 5 MB comfortably covers any real source/config file.
+const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+
+// Returns byte size, or null if the file can't be stat'd (gone, permission
+// denied) — null lets the caller fall through to safeRead()'s own existing
+// error handling instead of treating a stat failure as "small enough".
+function getFileSize(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch (_) {
+    return null;
+  }
+}
+
 function safeRead(filePath) {
   try {
+    // Fail closed when size can't be confirmed (stat error on an otherwise
+    // readable path is a narrow race, not a normal case) rather than falling
+    // through to an unbounded readFileSync — a null here must never be
+    // treated as "small enough to read".
+    const size = getFileSize(filePath);
+    if (size === null || size > MAX_FILE_SIZE_BYTES) return null;
     const buf = fs.readFileSync(filePath);
     if (isBinaryBuffer(buf)) return null;
-    return buf.toString('utf8');
+    return decodeText(buf);
   } catch (_) {
     return null;
   }
@@ -587,11 +632,59 @@ function isBinary(filePath) {
           '.ttf','.eot','.pdf','.zip','.tar','.gz','.mp4','.mp3'].includes(ext);
 }
 
+// A UTF-16 BOM (0xFF 0xFE little-endian, 0xFE 0xFF big-endian) is the one
+// case where a leading null byte means "text", not "binary": every ASCII
+// character in UTF-16 encodes as one real byte + one 0x00 pad byte, so the
+// plain null-byte heuristic below would otherwise misclassify any UTF-16
+// text file (e.g. a Windows Notepad "Unicode"-saved .env) as binary and skip
+// it entirely, losing any secret inside. A file with no BOM at all (rare for
+// UTF-16, common tooling always writes one) still falls through to the
+// heuristic below and is out of scope here.
+//
+// A UTF-32 LE BOM (FF FE 00 00) shares its first two bytes with UTF-16 LE's
+// BOM — the next two bytes must be checked before committing to UTF-16, or a
+// UTF-32 file gets silently mis-decoded as garbled UTF-16 text instead of
+// being left alone. UTF-32 is itself out of scope (same as no-BOM UTF-16):
+// it falls through to the null-byte heuristic below and is treated as
+// binary, exactly like before this whole fix.
+function detectUtf16Bom(buf) {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    const isUtf32Le = buf.length >= 4 && buf[2] === 0x00 && buf[3] === 0x00;
+    return isUtf32Le ? null : 'LE';
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    return 'BE';
+  }
+  return null;
+}
+
 function isBinaryBuffer(buf) {
+  if (detectUtf16Bom(buf)) return false;
   for (let i = 0; i < Math.min(512, buf.length); i++) {
     if (buf[i] === 0) return true;
   }
   return false;
+}
+
+// Decodes a UTF-16 buffer (BOM-stripped) to a normal JS string so the
+// existing SECRET_PATTERNS regexes (all written against decoded text) run
+// unchanged. Node has no native 'utf16be' decoder, so big-endian is
+// byte-swapped to little-endian first.
+function decodeText(buf) {
+  const bom = detectUtf16Bom(buf);
+  if (bom === 'LE') {
+    return buf.slice(2).toString('utf16le');
+  }
+  if (bom === 'BE') {
+    const swapped = Buffer.from(buf.slice(2));
+    for (let i = 0; i + 1 < swapped.length; i += 2) {
+      const tmp = swapped[i];
+      swapped[i] = swapped[i + 1];
+      swapped[i + 1] = tmp;
+    }
+    return swapped.toString('utf16le');
+  }
+  return buf.toString('utf8');
 }
 
 /**

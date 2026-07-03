@@ -81,7 +81,7 @@ These folders are **not excluded by default** from `npm publish` or `git push`. 
 | **Crypto** | **BIP39 12/24-word mnemonics (any format), Ethereum private keys, Bitcoin WIF** |
 | Keys | RSA / EC / SSH private keys, JWT secrets |
 | **Base64** | **Encoded secrets — decoded and matched against known prefixes** |
-| Catch-all | Any `PASSWORD=`, `SECRET=`, `API_KEY=`, `TOKEN=` longer than 8 chars |
+| Catch-all | Any `PASSWORD=`, `SECRET=`, `TOKEN=`, or `*_KEY=` (e.g. `ENCRYPTION_KEY`, `STRIPE_KEY`) longer than 8 chars — quoted values may contain spaces |
 
 ### Git history scan
 Catches secrets that were committed in the past — even if they were deleted later. GitHub caches all commits forever.
@@ -260,6 +260,7 @@ Strings labeled as keys/tokens are decoded from Base64, then the decoded value i
 **What it does NOT scan:**
 - Environment variables (runtime values, not in files)
 - Binary files, images, PDFs
+- Files larger than 5 MB (skipped for performance — flagged with a warning, not silently ignored)
 - Non-standard secret formats with no known prefix
 
 ---
