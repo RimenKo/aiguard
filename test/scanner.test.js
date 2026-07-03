@@ -206,7 +206,7 @@ test('git repo with a corrupted index — ls-files fails but scan does not crash
   assert.doesNotThrow(() => { findings = scanIsolated(dir); });
   assert.strictEqual(
     findingsFor(findings, 'index.js').length, 1,
-    'ignore-based fallback still finds the secret even though git ls-files failed'
+    'full-directory walk fallback still finds the secret even though git ls-files failed'
   );
   const degraded = findings.filter((f) => f.type === 'git_awareness_degraded');
   assert.strictEqual(degraded.length, 1, 'expected a warning that git ls-files failed inside a real git repo');
@@ -332,7 +332,7 @@ test('mixed AI folder (.claude/): one file npm-confirmed, one git-only — messa
 });
 
 // ── npm pack itself unavailable — graceful fallback, not a crash or a gap ──
-test('npm unavailable (stripped PATH): scan() falls back to emulation and warns, does not crash', () => {
+test('npm unavailable (stripped PATH): scan() falls back to full-directory walk and warns, does not crash', () => {
   const dir = makeTempProject(); // no git — isGitRepo() will just report false
   writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-nonpm', version: '1.0.0' }));
   writeFile(dir, 'index.js', `const key = "${FAKE_SECRET}";`);
@@ -348,10 +348,96 @@ test('npm unavailable (stripped PATH): scan() falls back to emulation and warns,
 
   assert.strictEqual(
     findingsFor(findings, 'index.js').length, 1,
-    'ignore-based emulation alone (no git, no npm reachable) must still catch the secret'
+    'full-directory walk fallback alone (no git, no npm reachable) must still catch the secret'
   );
   const degraded = findings.filter((f) => f.type === 'npm_pack_degraded');
   assert.strictEqual(degraded.length, 1, 'expected a warning that npm pack --dry-run could not run');
+});
+
+// Creates a fake `npm` executable that unconditionally prints `stdout` and
+// exits 0, then prepends its directory to PATH for the duration of `fn` —
+// so getNpmPackFiles() (which spawns `npm` via the inherited process env)
+// calls this stub instead of the real npm pack. Used to force npm pack to
+// "succeed" with output that isn't the manifest shape getNpmPackFiles()
+// expects, without needing a real broken npm install.
+function withFakeNpm(stdout, fn) {
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiguard-fake-npm-'));
+  const fakeNpm = path.join(fakeDir, 'npm');
+  fs.writeFileSync(fakeNpm, `#!/bin/sh\necho '${stdout}'\n`);
+  fs.chmodSync(fakeNpm, 0o755);
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${fakeDir}${path.delimiter}${prevPath}`;
+  try {
+    fn();
+  } finally {
+    process.env.PATH = prevPath;
+    fs.rmSync(fakeDir, { recursive: true, force: true });
+  }
+}
+
+// ── getNpmPackFiles(): npm ran but its output couldn't be parsed ───────
+test('npm pack returns invalid JSON: npm_pack_degraded names the real reason', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-badjson', version: '1.0.0' }));
+  writeFile(dir, 'index.js', `const key = "${FAKE_SECRET}";`);
+
+  let findings;
+  withFakeNpm('not valid json at all', () => {
+    findings = scan(dir);
+  });
+
+  assert.strictEqual(
+    findingsFor(findings, 'index.js').length, 1,
+    'full-directory walk fallback still catches the secret even though npm pack "succeeded" with garbage output'
+  );
+  const degraded = findings.filter((f) => f.type === 'npm_pack_degraded');
+  assert.strictEqual(degraded.length, 1, 'expected exactly one npm_pack_degraded warning');
+  assert.match(degraded[0].detail, /невалидный JSON/, 'must name the actual reason (invalid JSON), not a generic message');
+});
+
+// ── getNpmPackFiles(): npm ran, output parsed, but isn't a publish manifest ─
+test('npm pack returns well-formed JSON of the wrong shape: npm_pack_degraded names the real reason', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-badshape', version: '1.0.0' }));
+  writeFile(dir, 'index.js', `const key = "${FAKE_SECRET}";`);
+
+  let findings;
+  withFakeNpm('{}', () => {
+    findings = scan(dir);
+  });
+
+  assert.strictEqual(
+    findingsFor(findings, 'index.js').length, 1,
+    'full-directory walk fallback still catches the secret even though npm pack "succeeded" with the wrong JSON shape'
+  );
+  const degraded = findings.filter((f) => f.type === 'npm_pack_degraded');
+  assert.strictEqual(degraded.length, 1, 'expected exactly one npm_pack_degraded warning');
+  assert.match(degraded[0].detail, /неожиданной формы/, 'must name the actual reason (unexpected shape), not a generic message');
+});
+
+// ── walkAllFiles() fallback: a directory it can't even list ─────────────
+test('walkAllFiles fallback: unreadable subdirectory is warned about, not silently dropped', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    return; // root bypasses chmod 000 — nothing to test under this account
+  }
+  const dir = makeTempProject(); // no git, no package.json — forces the walkAllFiles fallback path
+  writeFile(dir, 'index.js', `const key = "${FAKE_SECRET}";`);
+  const blockedDir = path.join(dir, 'blocked');
+  fs.mkdirSync(blockedDir);
+  writeFile(dir, 'blocked/secret.js', `const key = "${FAKE_SECRET}";`);
+  fs.chmodSync(blockedDir, 0o000);
+
+  let findings;
+  try {
+    findings = scanIsolated(dir);
+  } finally {
+    fs.chmodSync(blockedDir, 0o755);
+  }
+
+  assert.strictEqual(findingsFor(findings, 'index.js').length, 1, 'readable sibling file is still scanned');
+  const unreadable = findings.filter((f) => f.type === 'directory_unreadable');
+  assert.strictEqual(unreadable.length, 1, 'expected a warning naming the unreadable directory');
+  assert.strictEqual(unreadable[0].file, 'blocked', 'warning must name the actual directory that failed to list');
 });
 
 // ── git-tracked symlink to another tracked file ─────────────────────────
