@@ -471,14 +471,14 @@ function scan(projectRoot) {
         file: secretFile,
         detail,
       });
-      const content = safeRead(full);
+      const content = safeRead(full, secretFileSize);
       if (content) {
         findings.push(...scanContent(secretFile, content, 'CRITICAL'));
       }
     } else {
       // File exists locally but excluded — scan content anyway so the user
       // knows which specific secrets are at risk if the ignore ever breaks.
-      const content = safeRead(full);
+      const content = safeRead(full, secretFileSize);
       const secretsInside = content ? scanContent(secretFile, content, 'WARN') : [];
       if (secretsInside.length > 0) {
         findings.push({
@@ -518,7 +518,7 @@ function scan(projectRoot) {
       continue;
     }
 
-    const content = safeRead(full);
+    const content = safeRead(full, fileSize);
     if (!content) continue;
 
     findings.push(...scanContent(relFile, content, 'HIGH'));
@@ -610,17 +610,22 @@ function getFileSize(filePath) {
   }
 }
 
-function safeRead(filePath) {
+// `knownSize`, if passed, skips the internal stat() call — callers in scan()
+// already had to stat() the file themselves to decide whether to emit a
+// file_too_large warning, so re-stating here would just be a second syscall
+// for the same answer. Omit it to have safeRead stat the file itself.
+function safeRead(filePath, knownSize) {
   try {
     // Fail closed when size can't be confirmed (stat error on an otherwise
     // readable path is a narrow race, not a normal case) rather than falling
     // through to an unbounded readFileSync — a null here must never be
     // treated as "small enough to read".
-    const size = getFileSize(filePath);
+    const size = knownSize !== undefined ? knownSize : getFileSize(filePath);
     if (size === null || size > MAX_FILE_SIZE_BYTES) return null;
     const buf = fs.readFileSync(filePath);
-    if (isBinaryBuffer(buf)) return null;
-    return decodeText(buf);
+    const bom = detectUtf16Bom(buf);
+    if (!bom && isBinaryBuffer(buf)) return null;
+    return decodeText(buf, bom);
   } catch (_) {
     return null;
   }
@@ -658,8 +663,10 @@ function detectUtf16Bom(buf) {
   return null;
 }
 
-function isBinaryBuffer(buf) {
-  if (detectUtf16Bom(buf)) return false;
+// `bom`, if passed, skips the internal detectUtf16Bom() call — safeRead()
+// already computed it once to pick a decoder, no need to redo it here too.
+function isBinaryBuffer(buf, bom) {
+  if ((bom !== undefined ? bom : detectUtf16Bom(buf))) return false;
   for (let i = 0; i < Math.min(512, buf.length); i++) {
     if (buf[i] === 0) return true;
   }
@@ -669,9 +676,10 @@ function isBinaryBuffer(buf) {
 // Decodes a UTF-16 buffer (BOM-stripped) to a normal JS string so the
 // existing SECRET_PATTERNS regexes (all written against decoded text) run
 // unchanged. Node has no native 'utf16be' decoder, so big-endian is
-// byte-swapped to little-endian first.
-function decodeText(buf) {
-  const bom = detectUtf16Bom(buf);
+// byte-swapped to little-endian first. `bom`, if passed, skips re-detecting
+// it (see isBinaryBuffer above for why).
+function decodeText(buf, bom) {
+  if (bom === undefined) bom = detectUtf16Bom(buf);
   if (bom === 'LE') {
     return buf.slice(2).toString('utf16le');
   }
