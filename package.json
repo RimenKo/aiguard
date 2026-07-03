@@ -11,7 +11,7 @@
     "aiguard": "bin/aiguard.js"
   },
   "scripts": {
-    "test": "node test/patterns.test.js",
+    "test": "node test/patterns.test.js && node test/scanner.test.js",
     "prepublishOnly": "node bin/aiguard.js"
   },
   "files": [
