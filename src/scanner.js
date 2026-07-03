@@ -220,17 +220,24 @@ function resolveWithinRoot(root, relPath) {
   return full;
 }
 
-// Last-resort fallback for when NEITHER source of truth is available (see
-// getPublishFiles below) — deliberately NOT a re-implemented ignore-file
-// parser. It walks the whole tree, skipping only the two directories npm
-// categorically never publishes at the root (see NPM_NEVER_PUBLISHED), and
-// nothing else: no .gitignore/.npmignore parsing, no "files" field
-// emulation, no glob matching. Scanning too much (e.g. a gitignored build
-// artifact that wouldn't really publish) is the safe direction to err in
-// for a leak scanner — silently scanning too little, the way a
-// half-correct ignore-file emulation risks, is not.
-function walkAllFiles(startDir, base) {
-  base = base || startDir;
+// Last-resort fallback for when a source of truth this scan needs isn't
+// available (git for a non-npm project, or npm for an npm project whose
+// `npm pack` call failed — see getPublishFiles and scan() below) —
+// deliberately NOT a re-implemented ignore-file parser. It walks the whole
+// tree, skipping only the two directories npm categorically never publishes
+// at the root (see NPM_NEVER_PUBLISHED), and nothing else: no
+// .gitignore/.npmignore parsing, no "files" field emulation, no glob
+// matching. Scanning too much (e.g. a gitignored build artifact that
+// wouldn't really publish) is the safe direction to err in for a leak
+// scanner — silently scanning too little, the way a half-correct
+// ignore-file emulation risks, is not.
+//
+// `warnings`, if passed, collects a notice for each directory that couldn't
+// even be listed (e.g. permission denied) — the one case where this walk
+// itself would otherwise silently scan less than it looks like it does. A
+// single file disappearing between readdir and lstat (a normal race, not a
+// coverage gap) is not reported here — same as the rest of this file's walks.
+function walkAllFiles(startDir, warnings) {
   const results = [];
   const visited = new Set();
   // Итеративный обход — без рекурсии, не упирается в лимит стека
@@ -239,16 +246,21 @@ function walkAllFiles(startDir, base) {
   while (queue.length > 0) {
     const dir = queue.pop();
     let entries;
-    try { entries = fs.readdirSync(dir); } catch (_) { continue; }
+    try {
+      entries = fs.readdirSync(dir);
+    } catch (_) {
+      if (warnings) warnings.push(path.relative(startDir, dir) || '.');
+      continue;
+    }
 
     for (const entry of entries) {
       if (entry === 'node_modules' || entry === '.git') continue;
 
       const full = path.join(dir, entry);
-      const rel  = path.relative(base, full);
+      const rel  = path.relative(startDir, full);
 
       let stat;
-      try { stat = fs.lstatSync(full); } catch (_) { continue; }
+      try { stat = fs.lstatSync(full); } catch (_) { continue; } // gone between readdir and lstat — race, not a coverage gap
       if (stat.isSymbolicLink()) continue;
 
       if (stat.isDirectory()) {
@@ -279,7 +291,10 @@ function walkAllFiles(startDir, base) {
 // excludes a file that's git-tracked anyway (e.g. via `git add -f`): npm's
 // own manifest won't confirm it, so it correctly ends up reported as
 // git-only, never as "will publish to npm".
-function getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmed) {
+// `walkWarnings`, if passed, collects a notice for each directory the
+// walkAllFiles() fallback (see above) couldn't even list — only reachable
+// when npm pack itself failed, so this scan is that fallback's one caller.
+function getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmed, walkWarnings) {
   const rawGitFiles = getGitFileList(projectRoot, gitWarnings);
   const gitFiles = (rawGitFiles || []).filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
 
@@ -291,7 +306,7 @@ function getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmed) {
       const reason = npmErrorDetail[0] ? ` Причина: ${npmErrorDetail[0]}` : '';
       npmWarnings.push(`Команда "npm pack --dry-run" не отработала (npm недоступен, таймаут, невалидный package.json или другая ошибка самого npm) — вместо точного списка публикации используется полный обход папки проекта (без учёта .npmignore и "files"), чтобы не пропустить секрет из-за деградации источника.${reason}`);
     }
-    const fallbackFiles = walkAllFiles(projectRoot).filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
+    const fallbackFiles = walkAllFiles(projectRoot, walkWarnings).filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
     // Both lists must compare byte-for-byte per file, or the Set below fails
     // to de-duplicate a name that differs only in Unicode normalization
     // form: git normalizes to NFC, but fs.readdirSync() (used by
@@ -330,12 +345,13 @@ function scan(projectRoot) {
   const gitWarnings = [];
   const npmWarnings = [];
   const npmConfirmedFiles = new Set();
+  const walkWarnings = [];
   let publishFiles;
   if (isNpmProject) {
-    publishFiles = getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmedFiles);
+    publishFiles = getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmedFiles, walkWarnings);
   } else {
     const gitFiles = getGitFileList(projectRoot, gitWarnings);
-    publishFiles = gitFiles !== null ? gitFiles : walkAllFiles(projectRoot);
+    publishFiles = gitFiles !== null ? gitFiles : walkAllFiles(projectRoot, walkWarnings);
   }
 
   const context = isNpmProject ? 'npm-пакет' : 'git-коммит';
@@ -357,6 +373,18 @@ function scan(projectRoot) {
   //     gap (see getNpmPackFiles / getPublishFiles).
   for (const detail of npmWarnings) {
     findings.push({ severity: 'WARN', type: 'npm_pack_degraded', file: '.', detail });
+  }
+
+  // 0c. The walkAllFiles() fallback itself couldn't list one or more
+  //     directories (e.g. permission denied) — say so instead of silently
+  //     scanning less than even that last-resort walk claims to cover.
+  for (const dir of walkWarnings) {
+    findings.push({
+      severity: 'WARN',
+      type: 'directory_unreadable',
+      file: dir,
+      detail: `Не удалось прочитать папку "${dir}" при полном обходе проекта (нет доступа или похожая ошибка) — её содержимое пропущено, секреты внутри не проверены.`,
+    });
   }
 
   // 1. Check for AI tool folders in published files

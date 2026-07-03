@@ -198,7 +198,7 @@ test('git repo with a corrupted index — ls-files fails but scan does not crash
   git(dir, ['add', 'index.js']);
   // Corrupt the index after staging. `git rev-parse --is-inside-work-tree`
   // doesn't touch the index and still succeeds; `git ls-files` reads it and
-  // fails — the one case where getAllFilesGitAware() should emit a warning
+  // fails — the one case where getGitFileList() should emit a warning
   // instead of silently looking as thorough as a clean run.
   fs.writeFileSync(path.join(dir, '.git', 'index'), 'not-a-real-index');
 
@@ -231,9 +231,10 @@ test('non-ASCII filename (NFD/NFC mismatch) — same file not reported twice', (
 });
 
 // ── getNpmPackFiles(): npm truth catches what our own emulation misses ─
-// dyra #5: buildIgnoreList()'s defaultIgnore hardcodes 'dist' as excluded
-// unconditionally — but real npm has no such rule and publishes dist/ like
-// any other directory unless "files" or .npmignore/.gitignore says otherwise.
+// dyra #5: the old hand-rolled default-ignore list hardcoded 'dist' as
+// excluded unconditionally — but real npm has no such rule and publishes
+// dist/ like any other directory unless "files" or .npmignore/.gitignore
+// says otherwise.
 test('npm project, no "files" field: secret in dist/ IS published by real npm — must be reported', () => {
   const dir = makeTempProject(); // no git needed — npm pack doesn't require it
   writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-dist', version: '1.0.0' }));
@@ -246,10 +247,10 @@ test('npm project, no "files" field: secret in dist/ IS published by real npm �
   );
 });
 
-// dyra #6: when "files" is set, expandGlobs() only resolves exactly what's
-// listed — but npm always publishes package.json/README/LICENSE regardless
-// of whether "files" lists them. A secret sitting in one of those slips past
-// the old emulation entirely.
+// dyra #6: when "files" is set, the old hand-rolled glob-expansion only
+// resolved exactly what's listed — but npm always publishes
+// package.json/README/LICENSE regardless of whether "files" lists them. A
+// secret sitting in one of those slips past the old emulation entirely.
 test('npm project, "files" field set without README.md: secret in README.md IS published — must be reported', () => {
   const dir = makeTempProject();
   writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-readme', version: '1.0.0', files: ['src/'] }));
@@ -264,7 +265,7 @@ test('npm project, "files" field set without README.md: secret in README.md IS p
   const findings = scanIsolated(dir);
   assert.strictEqual(
     findingsFor(findings, 'README.md').length, 1,
-    'npm always publishes README.md even when "files" doesn\'t list it — expandGlobs() alone would miss this, only the npm-pack union catches it'
+    'npm always publishes README.md even when "files" doesn\'t list it — the old hand-rolled glob-expansion alone would have missed this, only the npm-pack union catches it'
   );
 });
 
