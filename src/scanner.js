@@ -597,7 +597,7 @@ function scan(projectRoot) {
 
 function scanContent(filePath, content, severity) {
   const results = [];
-  for (const { name, regex, validate } of SECRET_PATTERNS) {
+  for (const { name, regex, validate, severityOverride } of SECRET_PATTERNS) {
     regex.lastIndex = 0;
     let m;
     while ((m = regex.exec(content)) !== null) {
@@ -605,8 +605,12 @@ function scanContent(filePath, content, severity) {
       if (validate) {
         try { if (!validate(m[0])) continue; } catch (_) { continue; }
       }
+      let finalSeverity = severity;
+      if (severityOverride) {
+        try { finalSeverity = severityOverride(m[0]) ?? severity; } catch (_) { finalSeverity = severity; }
+      }
       results.push({
-        severity,
+        severity: finalSeverity,
         type: 'secret_pattern',
         file: filePath,
         detail: `${name}: ${mask(m[0])}`,

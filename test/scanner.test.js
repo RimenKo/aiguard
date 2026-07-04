@@ -720,5 +720,44 @@ test('file removed between listing and scanning (race) — no spurious file_unre
   assert.strictEqual(unreadable.length, 0, 'a file that disappeared between listing and scanning is a normal race — must not emit file_unreadable');
 });
 
+// ── BIP39 severity override: JSON/comma-array → WARN, spaces → HIGH ──────
+// Same 12 scrambled BIP39 words used in patterns.test.js — confirmed to
+// trigger the BIP39 mnemonic pattern (non-canonical order, ≥90% in dict).
+const BIP39_SEED_SAMPLE = [
+  'laptop', 'alien', 'romance', 'cereal', 'fruit', 'absent',
+  'unique', 'craft', 'always', 'noodle', 'heart', 'wheel',
+];
+
+test('BIP39 seed in JSON array (tags.json) — detected but WARN, not HIGH (does not block publish)', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'tags.json', JSON.stringify(BIP39_SEED_SAMPLE));
+
+  const findings = scanIsolated(dir);
+  const bip39 = findings.filter((f) => f.type === 'secret_pattern' && f.file === 'tags.json');
+  assert.ok(bip39.length > 0, 'BIP39 words in JSON array must still produce a finding (visible warning)');
+  assert.ok(bip39.every((f) => f.severity === 'WARN'), 'JSON-array BIP39 match must be WARN, not HIGH');
+});
+
+test('BIP39 seed space-separated (seed.txt) — detected as HIGH (real seed format unchanged)', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'seed.txt', BIP39_SEED_SAMPLE.join(' '));
+
+  const findings = scanIsolated(dir);
+  const bip39 = findings.filter((f) => f.type === 'secret_pattern' && f.file === 'seed.txt');
+  assert.ok(bip39.length > 0, 'space-separated BIP39 seed must still be detected');
+  assert.ok(bip39.some((f) => f.severity === 'HIGH'), 'space-separated BIP39 seed must remain HIGH');
+});
+
+test('BIP39 seed space-separated near commas in same file — still HIGH (not fooled by adjacent comma text)', () => {
+  const dir = makeTempProject();
+  // Real seed + comma-text on next line — greedy regex may pull both into one match
+  writeFile(dir, 'notes.txt', BIP39_SEED_SAMPLE.join(' ') + '\nbackup, copy, notes');
+
+  const findings = scanIsolated(dir);
+  const bip39 = findings.filter((f) => f.type === 'secret_pattern' && f.file === 'notes.txt');
+  assert.ok(bip39.length > 0, 'space-separated seed near commas must still be detected');
+  assert.ok(bip39.some((f) => f.severity === 'HIGH'), 'space-separated seed must remain HIGH even when commas appear nearby');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

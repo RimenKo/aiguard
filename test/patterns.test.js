@@ -208,6 +208,33 @@ test('seed as a bullet (•) list, one word per line', () => {
   assert.strictEqual(detects(md), true);
 });
 
+// ── severityOverride: comma/JSON-array format → WARN, space/newline → null ─
+test('severityOverride is a function on the BIP39 seed pattern', () => {
+  assert.strictEqual(typeof mnemonicPattern.severityOverride, 'function');
+});
+
+test('severityOverride: comma-separated BIP39 match returns WARN', () => {
+  assert.strictEqual(mnemonicPattern.severityOverride(words(12).join(', ')), 'WARN');
+});
+
+test('severityOverride: JSON-array BIP39 match (double-quoted words) returns WARN', () => {
+  assert.strictEqual(mnemonicPattern.severityOverride(JSON.stringify(words(12))), 'WARN');
+});
+
+test('severityOverride: space-separated BIP39 match returns null (no override, stays HIGH)', () => {
+  assert.strictEqual(mnemonicPattern.severityOverride(words(12).join(' ')), null);
+});
+
+test('severityOverride: newline-separated BIP39 match returns null (no override, stays HIGH)', () => {
+  assert.strictEqual(mnemonicPattern.severityOverride(words(12).join('\n')), null);
+});
+
+test('severityOverride: space-separated seed glued to comma text returns null (real seed, not a list)', () => {
+  // Greedy regex may sweep nearby comma-text into the same match; the
+  // letter-space-letter signal from seed words must keep severity HIGH.
+  assert.strictEqual(mnemonicPattern.severityOverride(words(12).join(' ') + ', some, extra, text'), null);
+});
+
 // ── Generic secret patterns: PASSWORD/SECRET/TOKEN + any *_KEY name ────
 const genericKeyPattern = SECRET_PATTERNS.find((p) => p.name === 'Generic secret key (*_KEY)');
 assert.ok(genericKeyPattern, 'Generic secret key (*_KEY) pattern not found in patterns.js');
