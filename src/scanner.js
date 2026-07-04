@@ -582,6 +582,7 @@ function scanContent(filePath, content, severity) {
         type: 'secret_pattern',
         file: filePath,
         detail: `${name}: ${mask(m[0])}`,
+        _raw: m[0],
       });
     }
   }
@@ -589,8 +590,8 @@ function scanContent(filePath, content, severity) {
 }
 
 function mask(value) {
-  if (value.length <= 8) return '***';
-  return value.slice(0, 6) + '***' + value.slice(-4);
+  if (value.length <= 8) return `***[${value.length}]`;
+  return value.slice(0, 3) + `***[${value.length}]`;
 }
 
 // A well-formed secret is never megabytes long, so nothing is lost by the
@@ -779,13 +780,15 @@ function scanGitHistory(projectRoot) {
     }
   }
 
-  // Scan each commit block, deduplicate by (pattern + masked value)
+  // Scan each commit block, deduplicate by raw matched value (pre-mask).
+  // Using the raw value avoids false collisions when two different secrets
+  // produce the same masked detail (e.g. two AWS keys with same prefix/length).
   const seen = new Set();
   for (const { sha, lines } of blocks) {
     if (!lines.length) continue;
     const hits = scanContent(`git:коммит ${sha}`, lines.join('\n'), 'HIGH');
     for (const hit of hits) {
-      const key = hit.detail;
+      const key = hit._raw;
       if (!seen.has(key)) {
         seen.add(key);
         findings.push(hit);
