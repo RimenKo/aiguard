@@ -49,11 +49,25 @@ if (Array.isArray(ti.edits)) {
 const content = texts.join('\n');
 if (!content) process.exit(0);
 
-for (const { name, regex, validate } of SECRET_PATTERNS) {
+// Default severity matches scanner.js's scanContent() default for regular
+// project files ('HIGH'). A pattern's severityOverride (e.g. the BIP39
+// mnemonic pattern demoting comma/JSON-formatted word lists — see
+// src/patterns.js) can lower a specific match to 'WARN'; only HIGH/CRITICAL
+// block the write, so the hook agrees with the publish-time scan instead of
+// blocking things the scan itself would only warn about.
+for (const { name, regex, validate, severityOverride } of SECRET_PATTERNS) {
   const r = new RegExp(regex.source, (regex.flags || '').replace('g', ''));
   const m = r.exec(content);
   if (!m) continue;
   if (validate && !validate(m[0])) continue;
+  let severity = 'HIGH';
+  if (severityOverride) {
+    try { severity = severityOverride(m[0]) ?? severity; } catch (_) { severity = 'HIGH'; }
+  }
+  if (severity === 'WARN') {
+    process.stderr.write(`aiguard: похоже на секрет (${name}), но низкая уверенность — не заблокировано.\n`);
+    continue;
+  }
   process.stderr.write(`aiguard: обнаружен секрет (${name}) — операция заблокирована.\n`);
   process.exit(2);
 }

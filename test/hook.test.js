@@ -101,6 +101,28 @@ check(
   0,
 );
 
+// ── severityOverride: hook agrees with scanner.js on WARN vs HIGH ──────────────
+// gitleaks:allow — fake fixture, not a real mnemonic (deterministic word slice for tests)
+const SEED_WORDS = ['actual', 'actress', 'actor', 'action', 'act', 'across', 'acquire', 'acoustic', 'acid', 'achieve', 'accuse', 'account'];
+
+check(
+  'Write: BIP39 seed as JSON array → WARN, not blocked',
+  { file_path: 'tags.json', content: JSON.stringify(SEED_WORDS) },
+  0,
+);
+
+check(
+  'Write: BIP39 seed comma-separated → WARN, not blocked',
+  { file_path: 'tags.txt', content: SEED_WORDS.join(', ') },
+  0,
+);
+
+check(
+  'Write: same words space-separated (real seed format) → still blocked',
+  { file_path: 'notes.txt', content: SEED_WORDS.join(' ') },
+  2,
+);
+
 // ── Edge cases ────────────────────────────────────────────────────────────────
 check(
   'Empty tool_input → allowed',
