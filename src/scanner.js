@@ -444,7 +444,11 @@ function scan(projectRoot) {
     if (!fs.existsSync(full)) continue;
 
     const secretFileSize = getFileSize(full);
-    if (secretFileSize !== null && secretFileSize > MAX_FILE_SIZE_BYTES) {
+    if (secretFileSize === null) {
+      // file exists (existsSync checked above) but stat failed — treat as
+      // unreadable: we know the file is there but can't verify its contents.
+      findings.push(fileUnreadableFinding(secretFile));
+    } else if (secretFileSize > MAX_FILE_SIZE_BYTES) {
       findings.push({
         severity: 'WARN',
         type: 'file_too_large',
@@ -472,29 +476,35 @@ function scan(projectRoot) {
         detail,
       });
       const content = safeRead(full, secretFileSize);
-      if (content) {
+      if (content === UNREADABLE) {
+        findings.push(fileUnreadableFinding(secretFile));
+      } else if (content) {
         findings.push(...scanContent(secretFile, content, 'CRITICAL'));
       }
     } else {
       // File exists locally but excluded — scan content anyway so the user
       // knows which specific secrets are at risk if the ignore ever breaks.
       const content = safeRead(full, secretFileSize);
-      const secretsInside = content ? scanContent(secretFile, content, 'WARN') : [];
-      if (secretsInside.length > 0) {
-        findings.push({
-          severity: 'WARN',
-          type: 'ai_secret_file_exists',
-          file: secretFile,
-          detail: `Исключён из публикации, но содержит ${secretsInside.length} секрет(ов) — опасно если .npmignore сломается.`,
-        });
-        findings.push(...secretsInside);
+      if (content === UNREADABLE) {
+        findings.push(fileUnreadableFinding(secretFile));
       } else {
-        findings.push({
-          severity: 'WARN',
-          type: 'ai_secret_file_exists',
-          file: secretFile,
-          detail: 'Файл существует локально, но исключён из публикации. Убедись, что .npmignore актуален.',
-        });
+        const secretsInside = content ? scanContent(secretFile, content, 'WARN') : [];
+        if (secretsInside.length > 0) {
+          findings.push({
+            severity: 'WARN',
+            type: 'ai_secret_file_exists',
+            file: secretFile,
+            detail: `Исключён из публикации, но содержит ${secretsInside.length} секрет(ов) — опасно если .npmignore сломается.`,
+          });
+          findings.push(...secretsInside);
+        } else {
+          findings.push({
+            severity: 'WARN',
+            type: 'ai_secret_file_exists',
+            file: secretFile,
+            detail: 'Файл существует локально, но исключён из публикации. Убедись, что .npmignore актуален.',
+          });
+        }
       }
     }
   }
@@ -517,8 +527,26 @@ function scan(projectRoot) {
       });
       continue;
     }
+    // stat failed — either a race (file disappeared between listing and
+    // scanning, which is normal and harmless) or a real access problem.
+    // Distinguish by checking whether the file still exists: if it does, we
+    // know the scan gap is real and must say so; if it's gone, stay silent.
+    if (fileSize === null) {
+      if (fs.existsSync(full)) {
+        findings.push(fileUnreadableFinding(relFile));
+      }
+      continue;
+    }
 
     const content = safeRead(full, fileSize);
+    // safeRead returns UNREADABLE (not null) when readFileSync throws
+    // EACCES/EPERM — stat succeeded (file is there, size is known) but the
+    // process has no read permission. Must warn explicitly rather than
+    // silently skip, or a chmod-000 file containing a secret goes undetected.
+    if (content === UNREADABLE) {
+      findings.push(fileUnreadableFinding(relFile));
+      continue;
+    }
     if (!content) continue;
 
     findings.push(...scanContent(relFile, content, 'HIGH'));
@@ -600,6 +628,25 @@ function mask(value) {
 // and regex-matching it. 5 MB comfortably covers any real source/config file.
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
+// Returned by safeRead() when the file exists but cannot be read due to a
+// permission error (EACCES/EPERM). Distinct from null ("binary content",
+// "too large", "stat failed", "gone during read") so callers can emit a
+// visible file_unreadable warning instead of silently skipping the file —
+// the same principle as directory_unreadable for folders.
+const UNREADABLE = Symbol('file_unreadable');
+
+// Builds the standard file_unreadable finding so all four callers in scan()
+// produce exactly the same shape and text — avoids silent divergence if the
+// message or severity ever needs to change.
+function fileUnreadableFinding(file) {
+  return {
+    severity: 'WARN',
+    type: 'file_unreadable',
+    file,
+    detail: `Нет прав на чтение файла "${file}" (нет прав доступа или ошибка при чтении) — содержимое не проверено на секреты.`,
+  };
+}
+
 // Returns byte size, or null if the file can't be stat'd (gone, permission
 // denied) — null lets the caller fall through to safeRead()'s own existing
 // error handling instead of treating a stat failure as "small enough".
@@ -627,7 +674,11 @@ function safeRead(filePath, knownSize) {
     const bom = detectUtf16Bom(buf);
     if (!bom && isBinaryBuffer(buf)) return null;
     return decodeText(buf, bom);
-  } catch (_) {
+  } catch (err) {
+    // Permission denied — caller needs to know this is a real access failure,
+    // not a race (file gone) or a binary content skip, so it can emit a
+    // visible warning rather than silently continuing.
+    if (err.code === 'EACCES' || err.code === 'EPERM') return UNREADABLE;
     return null;
   }
 }

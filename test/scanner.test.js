@@ -651,5 +651,74 @@ test('safeRead fails closed when stat() cannot confirm size, even though the fil
   );
 });
 
+// ── file_unreadable: chmod 000 file must warn, not silently skip ─────────
+// Acceptance test for the "предупреждение о нечитаемом файле" fix.
+// stat() succeeds on a chmod-000 file (directory execute-bit is what matters,
+// not the file's own read-bit), so getFileSize() returns a real size —
+// the permission failure only surfaces in readFileSync(), which throws EACCES.
+// Before this fix: safeRead() silently swallowed EACCES and returned null,
+// the caller's `if (!content) continue` dropped the file without any warning.
+test('permission-denied file (chmod 000) emits file_unreadable WARN, does not crash, is not silently skipped', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    return; // root bypasses chmod 000 — nothing to test under this account
+  }
+  const dir = makeTempProject();
+  writeFile(dir, 'locked.js', `const key = "${FAKE_SECRET}";`);
+  const lockedFile = path.join(dir, 'locked.js');
+  fs.chmodSync(lockedFile, 0o000);
+
+  let findings;
+  try {
+    assert.doesNotThrow(() => { findings = scanIsolated(dir); });
+  } finally {
+    fs.chmodSync(lockedFile, 0o644);
+  }
+
+  const unreadable = findings.filter((f) => f.type === 'file_unreadable' && f.file === 'locked.js');
+  assert.strictEqual(unreadable.length, 1, 'expected exactly one file_unreadable warning naming the permission-denied file');
+  assert.strictEqual(unreadable[0].severity, 'WARN', 'file_unreadable must have WARN severity');
+  // Secret itself must NOT be reported — we never read the contents
+  assert.strictEqual(findingsFor(findings, 'locked.js').length, 0, 'no secret_pattern finding expected for an unreadable file');
+});
+
+// ── file_unreadable: race condition (file disappears mid-scan) must stay silent ─
+// When a file listed by git/npm/walk disappears between listing and scanning,
+// getFileSize() returns null (ENOENT) AND existsSync() returns false — no
+// warning should be emitted (it is a normal race, not a coverage gap).
+test('file removed between listing and scanning (race) — no spurious file_unreadable warning', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'vanishing.js', `const key = "${FAKE_SECRET}";`);
+  // Resolve the real path: on macOS /tmp is a symlink, so resolveWithinRoot
+  // inside scan() will produce the realpath, which is what getFileSize sees.
+  const realVanishing = fs.realpathSync(path.join(dir, 'vanishing.js'));
+
+  const originalStatSync = fs.statSync;
+  const originalExistsSync = fs.existsSync;
+  // Simulate the file disappearing: both stat and existsSync see it as gone.
+  fs.statSync = function (p, ...rest) {
+    if (p === realVanishing) {
+      const err = new Error('simulated ENOENT (race)');
+      err.code = 'ENOENT';
+      throw err;
+    }
+    return originalStatSync.call(fs, p, ...rest);
+  };
+  fs.existsSync = function (p, ...rest) {
+    if (p === realVanishing) return false;
+    return originalExistsSync.call(fs, p, ...rest);
+  };
+
+  let findings;
+  try {
+    findings = scanIsolated(dir);
+  } finally {
+    fs.statSync = originalStatSync;
+    fs.existsSync = originalExistsSync;
+  }
+
+  const unreadable = findings.filter((f) => f.type === 'file_unreadable' && f.file === 'vanishing.js');
+  assert.strictEqual(unreadable.length, 0, 'a file that disappeared between listing and scanning is a normal race — must not emit file_unreadable');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
