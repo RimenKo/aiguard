@@ -697,11 +697,21 @@ function safeRead(filePath, knownSize) {
     if (!bom && isBinaryBuffer(buf)) return null;
     return decodeText(buf, bom);
   } catch (err) {
-    // Permission denied — caller needs to know this is a real access failure,
-    // not a race (file gone) or a binary content skip, so it can emit a
-    // visible warning rather than silently continuing.
-    if (err.code === 'EACCES' || err.code === 'EPERM') return UNREADABLE;
-    return null;
+    // ENOENT here means the file vanished between the stat above (or the
+    // caller's own stat) and this readFileSync — a normal race (file deleted
+    // mid-scan), confirmed by existsSync() also seeing it as gone, and must
+    // stay silent like the rest of this file's race handling.
+    //
+    // Any OTHER read failure — EACCES/EPERM (permission denied), EMFILE (too
+    // many open file descriptors), EIO (disk I/O error), or anything else —
+    // means the file IS there but genuinely couldn't be read. The caller
+    // needs to know this is a real access failure, not a race or a binary
+    // content skip, so it can emit a visible file_unreadable warning instead
+    // of silently dropping the file (and any secret inside it) with zero
+    // signal — previously only EACCES/EPERM were caught this way and every
+    // other code (EMFILE/EIO included) fell through to a silent `null`.
+    if (err.code === 'ENOENT' && !fs.existsSync(filePath)) return null;
+    return UNREADABLE;
   }
 }
 

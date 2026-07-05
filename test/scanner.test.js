@@ -779,6 +779,45 @@ test('file removed between listing and scanning (race) — no spurious file_unre
   assert.strictEqual(unreadable.length, 0, 'a file that disappeared between listing and scanning is a normal race — must not emit file_unreadable');
 });
 
+// ── file_unreadable: any read error other than EACCES/EPERM must also warn ─
+// Regression test for the "предупреждать при ЛЮБОЙ ошибке чтения файла" fix.
+// Before this fix, safeRead() only recognized EACCES/EPERM as a real read
+// failure — any other error code (EMFILE: too many open file descriptors,
+// EIO: disk I/O error, etc.) fell through to `return null`, and the caller's
+// `if (!content) continue` silently dropped the file with zero warning. A
+// secret inside a file hit by a transient EMFILE/EIO during the scan would
+// vanish from the results without a trace.
+test('EMFILE (or any non-permission read error) on an existing file emits file_unreadable WARN, not a silent skip', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'emfile.js', `const key = "${FAKE_SECRET}";`);
+  // Same realpath reasoning as the stat-flaky test above: resolveWithinRoot
+  // builds `full` from the REALPATH'd project root, so the path safeRead's
+  // readFileSync actually receives is the realpath, not the raw joined path.
+  const target = fs.realpathSync(path.join(dir, 'emfile.js'));
+
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = function (p, ...rest) {
+    if (p === target) {
+      const err = new Error('simulated EMFILE');
+      err.code = 'EMFILE';
+      throw err;
+    }
+    return originalReadFileSync.call(fs, p, ...rest);
+  };
+
+  let findings;
+  try {
+    findings = scanIsolated(dir);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+
+  const unreadable = findings.filter((f) => f.type === 'file_unreadable' && f.file === 'emfile.js');
+  assert.strictEqual(unreadable.length, 1, 'expected exactly one file_unreadable warning for the EMFILE-hit file, not a silent skip');
+  assert.strictEqual(unreadable[0].severity, 'WARN', 'file_unreadable must have WARN severity');
+  assert.strictEqual(findingsFor(findings, 'emfile.js').length, 0, 'no secret_pattern finding expected — content was never actually read');
+});
+
 // ── BIP39 seed: HIGH regardless of separator (JSON/comma/space) ──────────
 // Same 12 scrambled BIP39 words used in patterns.test.js — confirmed to
 // trigger the BIP39 mnemonic pattern (non-canonical order, ≥90% in dict).
