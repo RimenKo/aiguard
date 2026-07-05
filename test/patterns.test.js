@@ -309,5 +309,33 @@ test('long alphanumeric run with no _KEY does not cause catastrophic backtrackin
   assert.ok(elapsedMs < 500, `expected near-linear scan time (<500ms), took ${elapsedMs}ms`);
 });
 
+// ── DB connection string: ReDoS regression guard ────────────────────────
+// Found by a security audit: `[^@]+` (unbounded) directly before the
+// required `@` backtracks O(n^2) on any long run of "scheme://user:pass"
+// text that never contains an "@" — measured ~3.1s on 160KB of repeated
+// 'postgres://user:pass' before the {1,256} bound was added (12.2s on 320KB
+// through the live claude-hook). This locks in the fix.
+const dbConnPattern = SECRET_PATTERNS.find((p) => p.name === 'DB connection string');
+assert.ok(dbConnPattern, 'DB connection string pattern not found in patterns.js');
+
+function detectsDbConn(content) {
+  return detectsWith(dbConnPattern, content);
+}
+
+test('repeated "postgres://user:pass" with no "@" anywhere does not cause catastrophic backtracking (ReDoS regression)', () => {
+  const hostile = 'postgres://user:pass'.repeat(8000); // 160,000 chars, no "@" anywhere
+  const start = Date.now();
+  detectsDbConn(hostile);
+  const elapsedMs = Date.now() - start;
+  assert.ok(elapsedMs < 100, `expected near-linear scan time (<100ms), took ${elapsedMs}ms`);
+});
+
+test('real DB connection string is still caught (regression)', () => {
+  assert.strictEqual(
+    detectsDbConn('DATABASE_URL=postgres://myuser:mypassword123@db.example.com:5432/mydb'), // gitleaks:allow — fake fixture
+    true,
+  );
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

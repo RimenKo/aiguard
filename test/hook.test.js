@@ -140,6 +140,34 @@ check(
   0,
 );
 
+// ── DB connection string ReDoS regression: bounded via live hook ──────────────
+// Security-audit finding: unbounded `[^@]+` in the "DB connection string"
+// pattern (src/patterns.js) was O(n^2) with no size cap on the hook's input
+// — measured ~12.2s on a 320KB payload before the fix. This locks in both
+// halves of the fix (bounded regex + hook-level size cap) through the real
+// process, not just the regex in isolation.
+{
+  const content = 'postgres://user:pass'.repeat(16000); // 320,000 chars, no "@" anywhere
+  const start = Date.now();
+  const r = runHook({ file_path: 'notes.txt', content });
+  const elapsedMs = Date.now() - start;
+  assert.strictEqual(r.status, 0, `[DB conn ReDoS payload] expected exit 0 (no match, no "@"), got ${r.status}\nstderr: ${r.stderr}`);
+  assert.ok(elapsedMs < 1000, `[DB conn ReDoS payload] expected hook to return in <1s, took ${elapsedMs}ms`);
+  console.log(`✓ Write: 320KB payload with no "@" → allowed in ${elapsedMs}ms (<1s, ReDoS regression)`);
+  passed++;
+}
+
+// ── Hook-level input size cap ──────────────────────────────────────────────────
+// A payload over the hook's own size limit (separate from scanner.js's 5MB
+// file-size limit — this hook must stay fast for interactive writes) is
+// skipped (fail-open, like scanner.js's file_too_large WARN) rather than
+// scanned or blocked.
+check(
+  'Write: content over hook size limit (1MB) → allowed, not scanned',
+  { file_path: 'huge.txt', content: 'x'.repeat(1024 * 1024 + 1) },
+  0,
+);
+
 // ── Malformed stdin: fail-open (framework issue, not user secret) ─────────────
 function runHookRaw(rawInput) {
   return spawnSync(process.execPath, [HOOK], { input: rawInput, encoding: 'utf8' });

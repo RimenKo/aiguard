@@ -121,7 +121,17 @@ const SECRET_PATTERNS = [
   { name: 'Postmark server token',    regex: /(?:postmark[_\-]?(?:server[_\-]?)?token)\s*[=:]\s*["']?[a-zA-Z0-9\-]{36}["']?/gi },
 
   // ── Databases & storage ───────────────────────────────────────
-  { name: 'DB connection string',     regex: /(postgres|mysql|mongodb|redis):\/\/[^:]+:[^@]+@[^\s"'`]+/g },
+  // `[^@]+` (unbounded) before a required `@` is the same shape that made
+  // *_KEY quadratic below: when a prefix (postgres/mysql/mongodb/redis://)
+  // matches but the rest of the string never contains an "@", the engine
+  // scans all the way to the end of the string looking for it at every one
+  // of the many prefix positions — O(n^2) on any long run of
+  // "scheme://user:pass"-shaped text with no "@" (measured: unbounded took
+  // ~3.2s on 160KB, ~12.2s on 320KB through the live hook; {1,256} takes
+  // low-single-digit ms on the same input while still matching every real
+  // connection string, whose password segment is never remotely 256 chars
+  // long).
+  { name: 'DB connection string',     regex: /(postgres|mysql|mongodb|redis):\/\/[^:]+:[^@]{1,256}@[^\s"'`]+/g },
   { name: 'Supabase service key',     regex: /sbp_[a-zA-Z0-9]{40}/g },
   { name: 'Notion token',             regex: /(?:secret_|ntn_)[a-zA-Z0-9]{40,}/g },
   { name: 'PlanetScale token',        regex: /pscale_tkn_[a-zA-Z0-9_]{32,}/g },

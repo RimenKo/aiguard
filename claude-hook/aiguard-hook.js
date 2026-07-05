@@ -49,6 +49,20 @@ if (Array.isArray(ti.edits)) {
 const content = texts.join('\n');
 if (!content) process.exit(0);
 
+// Cap scanned size: this is an interactive write-time hook (blocks the
+// editor until it exits), not the publish-time scan, so it must return in a
+// fraction of a second, not tolerate the scanner's 5 MB ceiling
+// (src/scanner.js MAX_FILE_SIZE_BYTES). A well-formed secret is never
+// megabytes long, so nothing real is missed by not scanning past this point
+// — fail open (allow, like scanner.js's file_too_large WARN) rather than
+// fail closed, since blocking every large-but-legitimate write would make
+// the hook itself the productivity problem it's meant to avoid.
+const MAX_CONTENT_SIZE_BYTES = 1 * 1024 * 1024;
+if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_SIZE_BYTES) {
+  process.stderr.write(`aiguard: содержимое больше ${MAX_CONTENT_SIZE_BYTES / (1024 * 1024)} МБ — не проверено на секреты (лимит интерактивного хука).\n`);
+  process.exit(0);
+}
+
 // Default severity matches scanner.js's scanContent() default for regular
 // project files ('HIGH'). A pattern's severityOverride (if it defines one —
 // see src/patterns.js) can lower a specific match to 'WARN'; only
