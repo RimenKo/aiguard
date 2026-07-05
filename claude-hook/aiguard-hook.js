@@ -40,12 +40,18 @@ const ti = (input && input.tool_input) || {};
 // with no exit(2).
 try {
   // Collect every text chunk being written by this tool call:
-  //   Write      → ti.content
-  //   Edit       → ti.new_string
-  //   MultiEdit  → ti.edits[i].new_string  (was missing before this fix)
+  //   Write        → ti.content
+  //   Edit         → ti.new_string
+  //   MultiEdit    → ti.edits[i].new_string  (was missing before this fix)
+  //   NotebookEdit → ti.new_source  (was missing before this fix — the matcher
+  //                  regex /Write|Edit|MultiEdit/ already fires on this tool
+  //                  since 'NotebookEdit' contains the substring 'Edit', but
+  //                  the hook never read this field, so a secret in a Jupyter
+  //                  cell passed through completely silently, exit 0)
   const texts = [];
   if (ti.content) texts.push(ti.content);
   if (ti.new_string) texts.push(ti.new_string);
+  if (ti.new_source) texts.push(ti.new_source);
   if (Array.isArray(ti.edits)) {
     for (const e of ti.edits) {
       if (e && e.new_string) texts.push(e.new_string);

@@ -179,6 +179,33 @@ check(
   );
 }
 
+// ── NotebookEdit: secret in new_source is blocked ─────────────────────────────
+// Before the fix, the hook only read ti.content / ti.new_string / ti.edits[]
+// .new_string. settings.json's matcher regex /Write|Edit|MultiEdit/ already
+// fires for 'NotebookEdit' (it contains the substring 'Edit'), so the hook
+// process DID run — but it never looked at ti.new_source, the field Claude
+// Code puts a Jupyter cell's new content in. A secret in a notebook cell went
+// through completely silently: exit 0, no stderr warning at all.
+check(
+  'NotebookEdit: secret in new_source → blocked',
+  {
+    notebook_path: 'notebook.ipynb',
+    cell_id: 'abc123',
+    new_source: 'ANTHROPIC_API_KEY = "sk-ant-api03-fakekeytest1234567890abcde"', // gitleaks:allow — fake fixture
+  },
+  2,
+);
+
+check(
+  'NotebookEdit: no secret in new_source → allowed',
+  {
+    notebook_path: 'notebook.ipynb',
+    cell_id: 'abc123',
+    new_source: 'print("hello world")',
+  },
+  0,
+);
+
 // ── Edge cases ────────────────────────────────────────────────────────────────
 check(
   'Empty tool_input → allowed',
