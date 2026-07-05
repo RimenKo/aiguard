@@ -946,5 +946,27 @@ test('CLI: aiguard.js --npm-only exits 0 when the only secret is in a file npm "
   assert.strictEqual(normalStatus, 1, 'without --npm-only the same fixture (git-tracked) must still block (exit 1)');
 });
 
+// ── README regression: scanner reports ALL instances of a secret, not just the first ──
+// README's "How it works" claims the publish-time scan "Reports ALL instances
+// of each secret per file (not just the first)". Locks that in end-to-end via
+// scan(): a file with the SAME secret pattern matching twice must produce two
+// separate findings, not one.
+test('scan() reports every instance of a repeated secret in the same file, not just the first', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  const content = [
+    `const key1 = "${FAKE_SECRET}";`,
+    `const key2 = "AKIAZZZZZZZZZZZZZZZZ";`, // gitleaks:allow — fake fixture, second distinct AWS-shaped key
+  ].join('\n');
+  writeFile(dir, 'index.js', content);
+  git(dir, ['add', 'index.js']);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'index.js').length, 2,
+    'expected both instances of the AWS Access Key ID pattern in the same file to be reported, not just the first'
+  );
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -251,6 +251,9 @@ chmod +x .git/hooks/pre-commit
 1. Scans all non-gitignored files
 2. Reports findings before `git push`
 
+**Publish scan vs. real-time write hook:**
+"Reports ALL instances" above describes the `aiguard` CLI (the `npm publish` / `git push` scan) — it always enumerates every match of every secret pattern in a file. The separate real-time hook (`claude-hook/aiguard-hook.js`, triggered by Claude Code on every Write/Edit/MultiEdit/NotebookEdit) works differently: it's built to interrupt the write the instant it confirms a real secret, so it blocks and reports on the **first** HIGH/CRITICAL match it finds and stops there — it does not enumerate every secret that might be in the same write. It does still walk past earlier look-alike matches of the same pattern that fail validation (e.g. a benign word list that isn't a real BIP39 seed) so a genuine secret sitting right after one is never missed — that thoroughness affects what it's able to detect, not how many findings it prints once it decides to block.
+
 **Crypto mnemonic validation:**
 Candidate phrases are validated against the full official BIP39 wordlist (2048 words). At least 90% of words must be real BIP39 words — ordinary English sentences are not flagged.
 

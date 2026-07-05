@@ -260,4 +260,34 @@ function runHookRaw(rawInput) {
   passed++;
 }
 
+// ── README regression: hook blocks on the FIRST secret, not "ALL instances" ───
+// README's "Reports ALL instances of each secret per file" describes the
+// publish-time scanner (src/scanner.js's scanContent(), used by the `aiguard`
+// CLI) — NOT this interactive write-time hook. The hook is built to interrupt
+// the write the instant it confirms a real secret, so it must report exactly
+// ONE finding (the first pattern match in SECRET_PATTERNS order) and exit —
+// it must never keep scanning to also report a second, different secret
+// sitting later in the same write. "Anthropic API key" is pattern index 0 in
+// src/patterns.js; "GitHub token (classic)" comes much later — if the hook
+// enumerated everything (scanner-style) instead of failing fast, stderr would
+// also mention the GitHub token.
+{
+  const content = [
+    'ANTHROPIC_KEY=sk-ant-api03-fakekeytest1234567890abcde', // gitleaks:allow — fake fixture
+    'GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456', // gitleaks:allow — fake fixture
+  ].join('\n');
+  const r = runHook({ file_path: 'env.js', content });
+  assert.strictEqual(r.status, 2, `[fail-fast on first secret] expected exit 2, got ${r.status}\nstderr: ${r.stderr}`);
+  assert.ok(
+    r.stderr.includes('Anthropic API key'),
+    `[fail-fast on first secret] expected stderr to name the first match (Anthropic API key), got: ${r.stderr}`
+  );
+  assert.ok(
+    !r.stderr.includes('GitHub token'),
+    `[fail-fast on first secret] hook must stop at the first secret and NOT also report the second (GitHub token), got: ${r.stderr}`
+  );
+  console.log('✓ Write: two different secrets → hook blocks and reports only the first, not both (README: hook ≠ "reports ALL instances")');
+  passed++;
+}
+
 console.log(`\n✅ hook.test.js: ${passed} тестов прошло`);
