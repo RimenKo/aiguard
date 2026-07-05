@@ -512,7 +512,6 @@ function scan(projectRoot) {
   // 3. Scan all published files for secret patterns
   for (const relFile of publishFiles) {
     if (AI_SECRET_FILES.includes(relFile)) continue;
-    if (isBinary(relFile)) continue;
 
     const full = resolveWithinRoot(projectRoot, relFile);
     if (!full) continue; // defense in depth — publishFiles should already be root-safe
@@ -685,12 +684,6 @@ function safeRead(filePath, knownSize) {
     if (err.code === 'EACCES' || err.code === 'EPERM') return UNREADABLE;
     return null;
   }
-}
-
-function isBinary(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  return ['.png','.jpg','.jpeg','.gif','.ico','.woff','.woff2',
-          '.ttf','.eot','.pdf','.zip','.tar','.gz','.mp4','.mp3'].includes(ext);
 }
 
 // A UTF-16 BOM (0xFF 0xFE little-endian, 0xFE 0xFF big-endian) is the one

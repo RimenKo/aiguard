@@ -591,6 +591,59 @@ test('a real binary file (null byte, no BOM) is still skipped — unaffected by 
   );
 });
 
+// ── Extension is not a binary verdict: content decides ─────────────────
+// Regression test for the security-audit bug: isBinary() used to skip files
+// by EXTENSION alone (.gz/.zip/.pdf/.tar/etc.) before their content was ever
+// read — so a plain ASCII text file merely NAMED like an archive shipped a
+// real secret unscanned. The extension-based short-circuit is removed;
+// safeRead()'s own byte-level detector (isBinaryBuffer, null-byte heuristic)
+// is now the only thing that decides binary-vs-text.
+test('plain ASCII file named secrets.gz (not a real gzip) is scanned — secret inside is caught', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'secrets.gz', `sk-ant-${'a'.repeat(30)}`);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'secrets.gz').length, 1,
+    'a text file merely named .gz must still be scanned by content and its secret reported'
+  );
+});
+
+test('a real gzip-compressed file (genuine binary bytes) named secrets.gz is still skipped, no false positive', () => {
+  const dir = makeTempProject();
+  const zlib = require('zlib');
+  // Real gzip bytes of a payload that itself CONTAINS a secret in its
+  // (compressed, unreadable-as-text) byte stream — proves the file is
+  // skipped because the byte-level detector correctly sees binary content,
+  // not because the scanner got lucky and found nothing to match.
+  const compressed = zlib.gzipSync(Buffer.from(`sk-ant-${'a'.repeat(30)}`));
+  fs.writeFileSync(path.join(dir, 'secrets.gz'), compressed);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'secrets.gz').length, 0,
+    'a genuine gzip archive must still be skipped by the byte-level binary detector'
+  );
+});
+
+test('a real PNG file (signature bytes) is still skipped, no false positive', () => {
+  const dir = makeTempProject();
+  // Real PNG signature + a null-byte-laden IHDR-shaped chunk — genuine binary
+  // content, not text merely named .png.
+  const pngBuf = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), // PNG signature
+    Buffer.from([0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01]),
+    Buffer.from(`key=${FAKE_SECRET}`),
+  ]);
+  fs.writeFileSync(path.join(dir, 'logo.png'), pngBuf);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'logo.png').length, 0,
+    'a genuine PNG must still be skipped by the byte-level binary detector'
+  );
+});
+
 // ── Round-2 /validate fix: UTF-32 LE BOM must not be mis-read as UTF-16 ─
 // Found by an independent reviewer: a UTF-32 LE BOM (FF FE 00 00) shares its
 // first two bytes with UTF-16 LE's BOM (FF FE) — without checking the next
