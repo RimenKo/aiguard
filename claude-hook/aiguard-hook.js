@@ -50,11 +50,14 @@ const content = texts.join('\n');
 if (!content) process.exit(0);
 
 // Default severity matches scanner.js's scanContent() default for regular
-// project files ('HIGH'). A pattern's severityOverride (e.g. the BIP39
-// mnemonic pattern demoting comma/JSON-formatted word lists — see
-// src/patterns.js) can lower a specific match to 'WARN'; only HIGH/CRITICAL
-// block the write, so the hook agrees with the publish-time scan instead of
-// blocking things the scan itself would only warn about.
+// project files ('HIGH'). A pattern's severityOverride (if it defines one —
+// see src/patterns.js) can lower a specific match to 'WARN'; only
+// HIGH/CRITICAL block the write, so the hook agrees with the publish-time
+// scan instead of blocking things the scan itself would only warn about. No
+// pattern currently defines one: the BIP39 mnemonic patterns intentionally
+// always stay HIGH regardless of separator (comma/JSON/space) — a missed
+// real seed is unrecoverable, while a false-positive tag list is just a
+// WARN a human can dismiss.
 for (const { name, regex, validate, severityOverride } of SECRET_PATTERNS) {
   const r = new RegExp(regex.source, (regex.flags || '').replace('g', ''));
   const m = r.exec(content);

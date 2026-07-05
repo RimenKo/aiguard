@@ -101,25 +101,35 @@ check(
   0,
 );
 
-// ── severityOverride: hook agrees with scanner.js on WARN vs HIGH ──────────────
+// ── BIP39 seed: blocked regardless of separator (comma/JSON/space) ─────────────
+// A real seed backup is often stored as a JSON array (e.g. wallet exports
+// `{"mnemonic":[...]}`) — demoting that shape to WARN let a real leaked seed
+// through with exit 0. No format is demoted anymore: every validated match
+// blocks the write.
 // gitleaks:allow — fake fixture, not a real mnemonic (deterministic word slice for tests)
 const SEED_WORDS = ['actual', 'actress', 'actor', 'action', 'act', 'across', 'acquire', 'acoustic', 'acid', 'achieve', 'accuse', 'account'];
 
 check(
-  'Write: BIP39 seed as JSON array → WARN, not blocked',
+  'Write: BIP39 seed as JSON array → blocked (no severity demotion by separator)',
   { file_path: 'tags.json', content: JSON.stringify(SEED_WORDS) },
-  0,
+  2,
 );
 
 check(
-  'Write: BIP39 seed comma-separated → WARN, not blocked',
+  'Write: BIP39 seed comma-separated → blocked (no severity demotion by separator)',
   { file_path: 'tags.txt', content: SEED_WORDS.join(', ') },
-  0,
+  2,
 );
 
 check(
   'Write: same words space-separated (real seed format) → still blocked',
   { file_path: 'notes.txt', content: SEED_WORDS.join(' ') },
+  2,
+);
+
+check(
+  'Write: wallet.json mnemonic array (11x "abandon" + "about") → blocked',
+  { file_path: 'wallet.json', content: JSON.stringify({ mnemonic: Array(11).fill('abandon').concat('about') }) }, // gitleaks:allow — fake fixture, not a real seed
   2,
 );
 

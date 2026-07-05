@@ -720,22 +720,36 @@ test('file removed between listing and scanning (race) — no spurious file_unre
   assert.strictEqual(unreadable.length, 0, 'a file that disappeared between listing and scanning is a normal race — must not emit file_unreadable');
 });
 
-// ── BIP39 severity override: JSON/comma-array → WARN, spaces → HIGH ──────
+// ── BIP39 seed: HIGH regardless of separator (JSON/comma/space) ──────────
 // Same 12 scrambled BIP39 words used in patterns.test.js — confirmed to
 // trigger the BIP39 mnemonic pattern (non-canonical order, ≥90% in dict).
+// A real seed backup is often stored as a JSON array (e.g. wallet exports
+// `{"mnemonic":[...]}`) — demoting that shape to WARN let a real leaked seed
+// through with exit 0. A missed seed is unrecoverable; a false positive on a
+// tag list is just a WARN a human can glance past — so no format is demoted.
 const BIP39_SEED_SAMPLE = [
   'laptop', 'alien', 'romance', 'cereal', 'fruit', 'absent',
   'unique', 'craft', 'always', 'noodle', 'heart', 'wheel',
 ];
 
-test('BIP39 seed in JSON array (tags.json) — detected but WARN, not HIGH (does not block publish)', () => {
+test('BIP39 seed in JSON array (tags.json) — detected as HIGH, blocks publish', () => {
   const dir = makeTempProject();
   writeFile(dir, 'tags.json', JSON.stringify(BIP39_SEED_SAMPLE));
 
   const findings = scanIsolated(dir);
   const bip39 = findings.filter((f) => f.type === 'secret_pattern' && f.file === 'tags.json');
-  assert.ok(bip39.length > 0, 'BIP39 words in JSON array must still produce a finding (visible warning)');
-  assert.ok(bip39.every((f) => f.severity === 'WARN'), 'JSON-array BIP39 match must be WARN, not HIGH');
+  assert.ok(bip39.length > 0, 'BIP39 words in JSON array must still produce a finding');
+  assert.ok(bip39.every((f) => f.severity === 'HIGH'), 'JSON-array BIP39 match must be HIGH, not WARN');
+});
+
+test('BIP39 seed comma-separated (tags.txt) — detected as HIGH, blocks publish', () => {
+  const dir = makeTempProject();
+  writeFile(dir, 'tags.txt', BIP39_SEED_SAMPLE.join(', '));
+
+  const findings = scanIsolated(dir);
+  const bip39 = findings.filter((f) => f.type === 'secret_pattern' && f.file === 'tags.txt');
+  assert.ok(bip39.length > 0, 'comma-separated BIP39 match must still produce a finding');
+  assert.ok(bip39.every((f) => f.severity === 'HIGH'), 'comma-separated BIP39 match must be HIGH, not WARN');
 });
 
 test('BIP39 seed space-separated (seed.txt) — detected as HIGH (real seed format unchanged)', () => {
@@ -746,6 +760,23 @@ test('BIP39 seed space-separated (seed.txt) — detected as HIGH (real seed form
   const bip39 = findings.filter((f) => f.type === 'secret_pattern' && f.file === 'seed.txt');
   assert.ok(bip39.length > 0, 'space-separated BIP39 seed must still be detected');
   assert.ok(bip39.some((f) => f.severity === 'HIGH'), 'space-separated BIP39 seed must remain HIGH');
+});
+
+test('wallet.json mnemonic array (11x "abandon" + "about") — blocks publish end-to-end (exit 1)', () => {
+  const dir = makeTempProject();
+  const mnemonic = Array(11).fill('abandon').concat('about'); // gitleaks:allow — fake fixture, not a real seed
+  writeFile(dir, 'wallet.json', JSON.stringify({ mnemonic }));
+
+  let status = 0;
+  try {
+    execFileSync(process.execPath, [path.join(__dirname, '..', 'bin', 'aiguard.js'), dir], {
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+    });
+  } catch (err) {
+    status = err.status;
+  }
+  assert.strictEqual(status, 1, 'wallet.json with a real BIP39 mnemonic array must block publish (exit 1)');
 });
 
 test('BIP39 seed space-separated near commas in same file — still HIGH (not fooled by adjacent comma text)', () => {

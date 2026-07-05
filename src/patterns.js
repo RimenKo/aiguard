@@ -158,25 +158,18 @@ const SECRET_PATTERNS = [
         return containsMnemonic(words);
       } catch (_) { return false; }
     },
-    // Comma-separated or quoted form (JSON array, Python list, CSV tags) —
-    // the BIP39 wordlist (2048 common English words) covers ordinary tag and
-    // word lists by accident.  A genuine mnemonic backup is almost always
-    // written as plain space/newline-separated words.
-    //
-    // Demote to WARN only when the match BOTH contains a comma/quote AND has
-    // NO adjacent word pair separated by pure whitespace.  The pure-whitespace
-    // check (`[a-zA-Z][ \t\r\n]+[a-zA-Z]`) catches the case where a
-    // space-separated seed appears near commas elsewhere in the same file:
-    // the greedy regex can sweep both into one match, giving a comma-
-    // containing string that still belongs to a real seed — the letter-space-
-    // letter signal from the seed words reveals the true format.
-    severityOverride: (match) => {
-      if (!/[,"']/.test(match)) return null;
-      // Any direct letter → whitespace → letter pair means at least one word
-      // boundary inside the match is space/newline-separated → real seed format.
-      if (/[a-zA-Z]["']?[ \t\r\n]+["']?[a-zA-Z]/.test(match)) return null;
-      return 'WARN';
-    },
+    // No severityOverride: a validated match stays at the caller's default
+    // severity (HIGH) no matter how the words are separated. An earlier
+    // version demoted comma/quoted matches (JSON array, Python list, CSV
+    // tags) to WARN on the theory that the BIP39 wordlist (2048 common
+    // English words) accidentally covers ordinary tag/i18n word lists — but
+    // that demotion applied to ANY comma/quoted match, including a real seed
+    // backup stored the same way (e.g. a wallet export's
+    // `{"mnemonic":["abandon",...]}`), so a genuine leaked seed in that shape
+    // silently passed with exit 0. A missed seed is unrecoverable; a false
+    // positive on a tag list is just a WARN a human can glance past — so the
+    // tradeoff now favors catching every real seed over staying quiet on
+    // ordinary word lists.
   },
   {
     name: 'Crypto mnemonic (numbered BIP39 seed)',
