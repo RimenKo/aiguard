@@ -151,6 +151,34 @@ check(
   2,
 );
 
+// ── Decoy match before a real secret of the SAME pattern → still blocked ───────
+// Before the fix, the hook stripped the 'g' flag and called r.exec(content)
+// once per pattern (first match only). If that first match was a benign
+// decoy that failed validate() (e.g. the canonical BIP39 wordlist itself —
+// alphabetical order, not a real mnemonic), the hook moved on to the NEXT
+// PATTERN and never looked further into the content for another match of
+// THIS pattern — so a real seed appearing later in the same file, matched by
+// the same "Crypto mnemonic (BIP39 seed)" pattern, was never scanned at all.
+// scanner.js's scanContent() already looped through all matches via
+// regex.lastIndex; this locks the hook into the same behavior end-to-end.
+{
+  // Decoy: first 12 words of the BIP39 wordlist in canonical (alphabetical)
+  // order — matches the mnemonic regex shape but fails containsMnemonic()'s
+  // sliding-window check because canonical order isn't a real seed.
+  // gitleaks:allow — fake fixture, canonical wordlist order, not a real mnemonic
+  const decoy = ['abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract', 'absurd', 'abuse', 'access', 'accident'].join(' ');
+  // Real seed: same 12-word slice used elsewhere in this file, but shuffled
+  // out of canonical order so it passes containsMnemonic() as a genuine match.
+  // gitleaks:allow — fake fixture, not a real wallet seed
+  const realSeed = SEED_WORDS.join(' ');
+  const content = `канонический список слов из словаря BIP39 (не сид).\n${decoy}\nа_на_следующей_строке_настоящий_сид_через_пробелы\n${realSeed}`;
+  check(
+    'Write: decoy BIP39 wordlist match followed by real seed (same pattern) → blocked',
+    { file_path: 'notes.txt', content },
+    2,
+  );
+}
+
 // ── Edge cases ────────────────────────────────────────────────────────────────
 check(
   'Empty tool_input → allowed',

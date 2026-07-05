@@ -78,21 +78,29 @@ try {
   // always stay HIGH regardless of separator (comma/JSON/space) — a missed
   // real seed is unrecoverable, while a false-positive tag list is just a
   // WARN a human can dismiss.
+  // Walk every match per pattern (not just the first) — mirrors
+  // src/scanner.js's scanContent(). A pattern can match more than once in the
+  // same content (e.g. a decoy word-list that fails validate() followed
+  // later by a real secret of the same pattern); stopping at the first match
+  // meant a real secret sitting after a benign false-positive of the same
+  // pattern was never checked at all.
   for (const { name, regex, validate, severityOverride } of SECRET_PATTERNS) {
-    const r = new RegExp(regex.source, (regex.flags || '').replace('g', ''));
-    const m = r.exec(content);
-    if (!m) continue;
-    if (validate && !validate(m[0])) continue;
-    let severity = 'HIGH';
-    if (severityOverride) {
-      try { severity = severityOverride(m[0]) ?? severity; } catch (_) { severity = 'HIGH'; }
+    regex.lastIndex = 0;
+    let m;
+    while ((m = regex.exec(content)) !== null) {
+      if (m[0].length === 0) { regex.lastIndex++; continue; }
+      if (validate && !validate(m[0])) continue;
+      let severity = 'HIGH';
+      if (severityOverride) {
+        try { severity = severityOverride(m[0]) ?? severity; } catch (_) { severity = 'HIGH'; }
+      }
+      if (severity === 'WARN') {
+        process.stderr.write(`aiguard: похоже на секрет (${name}), но низкая уверенность — не заблокировано.\n`);
+        continue;
+      }
+      process.stderr.write(`aiguard: обнаружен секрет (${name}) — операция заблокирована.\n`);
+      process.exit(2);
     }
-    if (severity === 'WARN') {
-      process.stderr.write(`aiguard: похоже на секрет (${name}), но низкая уверенность — не заблокировано.\n`);
-      continue;
-    }
-    process.stderr.write(`aiguard: обнаружен секрет (${name}) — операция заблокирована.\n`);
-    process.exit(2);
   }
 } catch (err) {
   process.stderr.write(`aiguard: ошибка при проверке на секреты — ${err.message}\nОперация заблокирована.\n`);
