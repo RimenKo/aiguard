@@ -337,5 +337,56 @@ test('real DB connection string is still caught (regression)', () => {
   );
 });
 
+// ── AWS temporary (ASIA) keys + *_KEY_ID / *_KEY_VERSION name coverage ──
+// Found in an independent security audit: the AWS Access Key ID pattern only
+// matched the AKIA (long-term) prefix, missing ASIA (temporary STS/SSO/
+// assume-role) keys — the standard shape in any CI/CD pipeline. Separately,
+// the generic *_KEY pattern required "_KEY" to sit directly before "="/":",
+// so AWS_ACCESS_KEY_ID (where "_ID" follows "_KEY") was caught by NO pattern
+// at all except by coincidence if its value happened to look like an AKIA
+// key — never by variable name.
+const awsKeyIdPattern = SECRET_PATTERNS.find((p) => p.name === 'AWS Access Key ID');
+assert.ok(awsKeyIdPattern, 'AWS Access Key ID pattern not found in patterns.js');
+
+function detectsAwsKeyId(content) {
+  return detectsWith(awsKeyIdPattern, content);
+}
+
+test('AWS temporary (ASIA) key value is caught', () => {
+  assert.strictEqual(
+    detectsAwsKeyId('AWS_ACCESS_KEY_ID=ASIAABCDEFGHIJKLMNOP'), // gitleaks:allow — fake fixture, not a real key
+    true,
+  );
+});
+
+test('AWS long-term (AKIA) key value is still caught (regression)', () => {
+  assert.strictEqual(
+    detectsAwsKeyId('AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP'), // gitleaks:allow — fake fixture, not a real key
+    true,
+  );
+});
+
+test('AWS_ACCESS_KEY_ID caught by variable name (*_KEY_ID), even with a non-AKIA/ASIA-shaped value', () => {
+  assert.strictEqual(
+    detectsKey('AWS_ACCESS_KEY_ID=abcdefgh12345678'), // gitleaks:allow — fake fixture, not a real key
+    true,
+  );
+});
+
+test('AWS_ACCESS_KEY_VERSION caught by variable name (*_KEY_VERSION)', () => {
+  assert.strictEqual(
+    detectsKey('AWS_ACCESS_KEY_VERSION=abcdefgh12345678'), // gitleaks:allow — fake fixture, not a real key
+    true,
+  );
+});
+
+test('lowercase cache_key_id is NOT caught (false-positive guard unchanged after *_KEY_ID extension)', () => {
+  assert.strictEqual(detectsKey('cache_key_id = "abcdefgh12345678"'), false); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('lowercase primary_key_id is NOT caught (false-positive guard unchanged after *_KEY_ID extension)', () => {
+  assert.strictEqual(detectsKey('primary_key_id = "abcdefgh12345678"'), false); // gitleaks:allow — fake fixture, not a real key
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

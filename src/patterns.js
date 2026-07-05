@@ -87,7 +87,10 @@ const SECRET_PATTERNS = [
   { name: 'Together AI key',          regex: /(?:TOGETHER[_\-]?API[_\-]?KEY)\s*[=:]\s*["']?[a-zA-Z0-9]{40,}["']?/gi },
 
   // ── Cloud providers ───────────────────────────────────────────
-  { name: 'AWS Access Key ID',        regex: /AKIA[0-9A-Z]{16}/g },
+  // AKIA = long-term key, ASIA = temporary STS/SSO/assume-role credentials —
+  // the latter is the standard shape issued by any CI/CD pipeline (GitHub
+  // Actions OIDC, AWS SSO, assume-role) and was missing entirely before.
+  { name: 'AWS Access Key ID',        regex: /(?:AKIA|ASIA)[0-9A-Z]{16}/g },
   { name: 'AWS Secret Access Key',    regex: /(?:aws[_\-]?secret[_\-]?(?:access[_\-]?)?key)\s*[=:]\s*["']?[A-Za-z0-9\/+=]{40}["']?/gi },
   { name: 'GCP service account',      regex: /"type"\s*:\s*"service_account"/g },
   { name: 'Azure client secret',      regex: /(?:AZURE[_\-]?CLIENT[_\-]?SECRET)\s*[=:]\s*["']?[^\s"']{8,}["']?/gi },
@@ -221,18 +224,24 @@ const SECRET_PATTERNS = [
     // ANY compound *_KEY name (ENCRYPTION_KEY, SIGNING_KEY, STRIPE_KEY,
     // SECRET_KEY, ...) — a fixed enum of key names always misses the next
     // one a real project invents, so any_word_KEY is matched generically.
+    // Also matches the *_KEY_ID / *_KEY_VERSION shape (AWS_ACCESS_KEY_ID,
+    // AWS_ACCESS_KEY_VERSION, ...) via an optional (?:_ID|_VERSION)? suffix
+    // — plain "_KEY" alone doesn't match here because "_ID"/"_VERSION" comes
+    // right after it, so AWS_ACCESS_KEY_ID slipped past this pattern
+    // entirely before (only caught, if at all, by the AWS-value pattern).
     // Deliberately case-SENSITIVE (no /i) and unlike the pattern above:
     // env-style secret names are conventionally UPPER_SNAKE_CASE, and
     // matching case-insensitively would also flag ordinary lowercase code
-    // identifiers that just happen to end in _key (cache_key, primary_key,
-    // foreign_key, s3_object_key) as HIGH-severity leaks.
+    // identifiers that just happen to end in _key or _key_id (cache_key,
+    // primary_key, foreign_key, s3_object_key, cache_key_id, primary_key_id)
+    // as HIGH-severity leaks.
     // {0,63} instead of an unbounded * — a bare `*` directly before a
     // required literal means the engine backtracks through every possible
     // split point when "_KEY" doesn't follow, which is O(n^2) on any long
     // alphanumeric run with no underscore (measured: unbounded took ~6.9s
     // on 80KB of hex-like text; {0,63} takes ~13ms on the same input while
     // still matching every real key name, none of which are 60+ chars long).
-    regex: /[A-Z][A-Z0-9]{0,63}_KEY\s*[=:]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s"']{8,})/g,
+    regex: /[A-Z][A-Z0-9]{0,63}_KEY(?:_ID|_VERSION)?\s*[=:]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s"']{8,})/g,
   },
 
   // ── Base64-obfuscated secrets ──────────────────────────────────
