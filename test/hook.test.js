@@ -53,6 +53,24 @@ check(
   0,
 );
 
+// ── Regression: null element in edits[] must not crash the process ─────────────
+// Before the fix, `if (e.new_string)` threw a TypeError reading `.new_string`
+// off `null`, crashing the process with exit 1 (uncaught exception) *before*
+// the pattern-search loop ever ran — so a real secret sitting in another
+// edits[] element (e.g. edits[0]) went completely unchecked. Fail-closed now
+// requires exit 2, not 0 and not 1.
+check(
+  'MultiEdit: secret in edits[0] + null in edits[1] → blocked (exit 2, not crash)',
+  {
+    file_path: 'config.js',
+    edits: [
+      { old_string: 'A', new_string: 'key = AKIAABCDEFGHIJKLMNOP' }, // gitleaks:allow — fake fixture
+      null,
+    ],
+  },
+  2,
+);
+
 // ── OpenAI sk-proj- (was missed by old regex) ──────────────────────────────
 check(
   'Write: sk-proj- OpenAI key → blocked',

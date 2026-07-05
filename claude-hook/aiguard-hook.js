@@ -33,58 +33,68 @@ try {
 
 const ti = (input && input.tool_input) || {};
 
-// Collect every text chunk being written by this tool call:
-//   Write      → ti.content
-//   Edit       → ti.new_string
-//   MultiEdit  → ti.edits[i].new_string  (was missing before this fix)
-const texts = [];
-if (ti.content) texts.push(ti.content);
-if (ti.new_string) texts.push(ti.new_string);
-if (Array.isArray(ti.edits)) {
-  for (const e of ti.edits) {
-    if (e.new_string) texts.push(e.new_string);
+// Fail-closed on any error while collecting text or scanning for secrets:
+// a crash here must never let a write through unchecked (same reasoning as
+// the patterns-require fail-closed above). This also covers a future
+// pattern's validate() throwing — that would otherwise crash the process
+// with no exit(2).
+try {
+  // Collect every text chunk being written by this tool call:
+  //   Write      → ti.content
+  //   Edit       → ti.new_string
+  //   MultiEdit  → ti.edits[i].new_string  (was missing before this fix)
+  const texts = [];
+  if (ti.content) texts.push(ti.content);
+  if (ti.new_string) texts.push(ti.new_string);
+  if (Array.isArray(ti.edits)) {
+    for (const e of ti.edits) {
+      if (e && e.new_string) texts.push(e.new_string);
+    }
   }
-}
 
-const content = texts.join('\n');
-if (!content) process.exit(0);
+  const content = texts.join('\n');
+  if (!content) process.exit(0);
 
-// Cap scanned size: this is an interactive write-time hook (blocks the
-// editor until it exits), not the publish-time scan, so it must return in a
-// fraction of a second, not tolerate the scanner's 5 MB ceiling
-// (src/scanner.js MAX_FILE_SIZE_BYTES). A well-formed secret is never
-// megabytes long, so nothing real is missed by not scanning past this point
-// — fail open (allow, like scanner.js's file_too_large WARN) rather than
-// fail closed, since blocking every large-but-legitimate write would make
-// the hook itself the productivity problem it's meant to avoid.
-const MAX_CONTENT_SIZE_BYTES = 1 * 1024 * 1024;
-if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_SIZE_BYTES) {
-  process.stderr.write(`aiguard: содержимое больше ${MAX_CONTENT_SIZE_BYTES / (1024 * 1024)} МБ — не проверено на секреты (лимит интерактивного хука).\n`);
-  process.exit(0);
-}
-
-// Default severity matches scanner.js's scanContent() default for regular
-// project files ('HIGH'). A pattern's severityOverride (if it defines one —
-// see src/patterns.js) can lower a specific match to 'WARN'; only
-// HIGH/CRITICAL block the write, so the hook agrees with the publish-time
-// scan instead of blocking things the scan itself would only warn about. No
-// pattern currently defines one: the BIP39 mnemonic patterns intentionally
-// always stay HIGH regardless of separator (comma/JSON/space) — a missed
-// real seed is unrecoverable, while a false-positive tag list is just a
-// WARN a human can dismiss.
-for (const { name, regex, validate, severityOverride } of SECRET_PATTERNS) {
-  const r = new RegExp(regex.source, (regex.flags || '').replace('g', ''));
-  const m = r.exec(content);
-  if (!m) continue;
-  if (validate && !validate(m[0])) continue;
-  let severity = 'HIGH';
-  if (severityOverride) {
-    try { severity = severityOverride(m[0]) ?? severity; } catch (_) { severity = 'HIGH'; }
+  // Cap scanned size: this is an interactive write-time hook (blocks the
+  // editor until it exits), not the publish-time scan, so it must return in a
+  // fraction of a second, not tolerate the scanner's 5 MB ceiling
+  // (src/scanner.js MAX_FILE_SIZE_BYTES). A well-formed secret is never
+  // megabytes long, so nothing real is missed by not scanning past this point
+  // — fail open (allow, like scanner.js's file_too_large WARN) rather than
+  // fail closed, since blocking every large-but-legitimate write would make
+  // the hook itself the productivity problem it's meant to avoid.
+  const MAX_CONTENT_SIZE_BYTES = 1 * 1024 * 1024;
+  if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_SIZE_BYTES) {
+    process.stderr.write(`aiguard: содержимое больше ${MAX_CONTENT_SIZE_BYTES / (1024 * 1024)} МБ — не проверено на секреты (лимит интерактивного хука).\n`);
+    process.exit(0);
   }
-  if (severity === 'WARN') {
-    process.stderr.write(`aiguard: похоже на секрет (${name}), но низкая уверенность — не заблокировано.\n`);
-    continue;
+
+  // Default severity matches scanner.js's scanContent() default for regular
+  // project files ('HIGH'). A pattern's severityOverride (if it defines one —
+  // see src/patterns.js) can lower a specific match to 'WARN'; only
+  // HIGH/CRITICAL block the write, so the hook agrees with the publish-time
+  // scan instead of blocking things the scan itself would only warn about. No
+  // pattern currently defines one: the BIP39 mnemonic patterns intentionally
+  // always stay HIGH regardless of separator (comma/JSON/space) — a missed
+  // real seed is unrecoverable, while a false-positive tag list is just a
+  // WARN a human can dismiss.
+  for (const { name, regex, validate, severityOverride } of SECRET_PATTERNS) {
+    const r = new RegExp(regex.source, (regex.flags || '').replace('g', ''));
+    const m = r.exec(content);
+    if (!m) continue;
+    if (validate && !validate(m[0])) continue;
+    let severity = 'HIGH';
+    if (severityOverride) {
+      try { severity = severityOverride(m[0]) ?? severity; } catch (_) { severity = 'HIGH'; }
+    }
+    if (severity === 'WARN') {
+      process.stderr.write(`aiguard: похоже на секрет (${name}), но низкая уверенность — не заблокировано.\n`);
+      continue;
+    }
+    process.stderr.write(`aiguard: обнаружен секрет (${name}) — операция заблокирована.\n`);
+    process.exit(2);
   }
-  process.stderr.write(`aiguard: обнаружен секрет (${name}) — операция заблокирована.\n`);
+} catch (err) {
+  process.stderr.write(`aiguard: ошибка при проверке на секреты — ${err.message}\nОперация заблокирована.\n`);
   process.exit(2);
 }
