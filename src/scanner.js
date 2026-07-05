@@ -308,8 +308,16 @@ function walkAllFiles(startDir, warnings) {
 // `walkWarnings`, if passed, collects a notice for each directory the
 // walkAllFiles() fallback (see above) couldn't even list — only reachable
 // when npm pack itself failed, so this scan is that fallback's one caller.
-function getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmed, walkWarnings) {
-  const rawGitFiles = getGitFileList(projectRoot, gitWarnings);
+// `npmOnly`, if true, drops the git-sourced half of the union entirely (used
+// by `aiguard --npm-only`, see bin/aiguard.js): git-tracked files that npm
+// itself would never publish (e.g. test/ fixtures excluded via package.json
+// "files") are not included at all, instead of merely being labeled
+// git-only. When npm pack itself fails there is no npm-only source of truth
+// to fall back to, so the walkAllFiles() fallback below (a superset,
+// deliberately erring toward scanning too much) is used regardless of
+// npmOnly, same as the non-npmOnly path.
+function getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmed, walkWarnings, npmOnly) {
+  const rawGitFiles = npmOnly ? [] : getGitFileList(projectRoot, gitWarnings);
   const gitFiles = (rawGitFiles || []).filter((f) => !isUnderAnyDir(f, NPM_NEVER_PUBLISHED));
 
   const npmErrorDetail = [];
@@ -346,23 +354,34 @@ function getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmed, wa
 
 /**
  * Main scan: returns array of findings { file, type, match }
+ *
+ * `options.npmOnly`, if true, scans ONLY what `npm pack --dry-run --json`
+ * would actually publish — the git-sourced half of the union (used to also
+ * catch `git push` leaks) is left out entirely. Meant for `prepublishOnly`
+ * (see bin/aiguard.js's `--npm-only` flag): a file git tracks but npm itself
+ * excludes (e.g. test/ fixtures kept out via package.json "files") is a real
+ * git-push concern but not an npm-publish one, and shouldn't block
+ * `npm publish`. Has no effect for non-npm projects (no npm pack to run).
  */
-function scan(projectRoot) {
+function scan(projectRoot, options) {
   projectRoot = projectRoot || process.cwd();
+  options = options || {};
+  const npmOnly = !!options.npmOnly;
   const findings = [];
 
   const pkgPath = path.join(projectRoot, 'package.json');
   const isNpmProject = fs.existsSync(pkgPath);
 
-  // For npm projects: only files that will be published (git ∪ npm pack).
-  // For other projects (Python, Go, etc.): whatever git tracks (would `git push`).
+  // For npm projects: only files that will be published (git ∪ npm pack, or
+  // npm pack alone when npmOnly). For other projects (Python, Go, etc.):
+  // whatever git tracks (would `git push`).
   const gitWarnings = [];
   const npmWarnings = [];
   const npmConfirmedFiles = new Set();
   const walkWarnings = [];
   let publishFiles;
   if (isNpmProject) {
-    publishFiles = getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmedFiles, walkWarnings);
+    publishFiles = getPublishFiles(projectRoot, gitWarnings, npmWarnings, npmConfirmedFiles, walkWarnings, npmOnly);
   } else {
     const gitFiles = getGitFileList(projectRoot, gitWarnings);
     publishFiles = gitFiles !== null ? gitFiles : walkAllFiles(projectRoot, walkWarnings);

@@ -12,7 +12,7 @@
   },
   "scripts": {
     "test": "node test/patterns.test.js && node test/scanner.test.js && node test/hook.test.js",
-    "prepublishOnly": "node bin/aiguard.js"
+    "prepublishOnly": "node bin/aiguard.js --npm-only"
   },
   "files": [
     "bin/",

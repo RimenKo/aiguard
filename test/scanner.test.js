@@ -47,12 +47,18 @@ function findingsFor(findings, relFile) {
 // pick up the host's real ~/.gitconfig / ~/.gitignore_global too. Same
 // isolation as the git() helper above, applied around the call under test.
 function scanIsolated(dir) {
+  return scanIsolatedWith(dir);
+}
+
+// Same isolation as scanIsolated(), but forwards `options` to scan() — used
+// by tests that need e.g. { npmOnly: true }.
+function scanIsolatedWith(dir, options) {
   const prevGlobal = process.env.GIT_CONFIG_GLOBAL;
   const prevSystem = process.env.GIT_CONFIG_SYSTEM;
   process.env.GIT_CONFIG_GLOBAL = '/dev/null';
   process.env.GIT_CONFIG_SYSTEM = '/dev/null';
   try {
-    return scan(dir);
+    return scan(dir, options);
   } finally {
     if (prevGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = prevGlobal;
     if (prevSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM; else process.env.GIT_CONFIG_SYSTEM = prevSystem;
@@ -841,6 +847,64 @@ test('BIP39 seed space-separated near commas in same file — still HIGH (not fo
   const bip39 = findings.filter((f) => f.type === 'secret_pattern' && f.file === 'notes.txt');
   assert.ok(bip39.length > 0, 'space-separated seed near commas must still be detected');
   assert.ok(bip39.some((f) => f.severity === 'HIGH'), 'space-separated seed must remain HIGH even when commas appear nearby');
+});
+
+// ── --npm-only: scan(dir, {npmOnly:true}) drops the git-only half entirely ──
+// Regression test for prepublishOnly false-blocking on test/ fixtures: a file
+// git tracks but package.json "files" excludes from npm publish (e.g. a
+// test/*.test.js secret fixture) must not appear at all when npmOnly is set,
+// not merely be relabeled as "git-only" — real `npm publish` never ships it,
+// so it must not block prepublishOnly. The same file must still be reported
+// by a normal (non-npmOnly) scan, since that one also guards `git push`.
+test('npmOnly: git-tracked file excluded from npm "files" is not reported at all under --npm-only, but still reported without it', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-npmonly', version: '1.0.0', files: ['src'] }));
+  writeFile(dir, 'src/index.js', 'module.exports = 1;\n');
+  // Mirrors the real aiguard repo: a test fixture with an intentional fake
+  // secret, git-tracked, but outside package.json "files" so npm never ships it.
+  writeFile(dir, 'test/fixture.test.js', `const key = "${FAKE_SECRET}"; // gitleaks:allow\n`);
+  git(dir, ['add', 'package.json', 'src/index.js', 'test/fixture.test.js']);
+
+  const npmOnlyFindings = scanIsolatedWith(dir, { npmOnly: true });
+  assert.strictEqual(
+    findingsFor(npmOnlyFindings, 'test/fixture.test.js').length, 0,
+    '--npm-only must not report a secret in a file real npm publish would never ship'
+  );
+
+  const normalFindings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(normalFindings, 'test/fixture.test.js').length, 1,
+    'without --npm-only, the git-tracked fixture must still be reported (guards against a git push leak)'
+  );
+});
+
+// ── --npm-only end-to-end via the real CLI: prepublishOnly no longer blocks ──
+test('CLI: aiguard.js --npm-only exits 0 when the only secret is in a file npm "files" excludes', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-npmonly-cli', version: '1.0.0', files: ['src'] }));
+  writeFile(dir, 'src/index.js', 'module.exports = 1;\n');
+  writeFile(dir, 'test/fixture.test.js', `const key = "${FAKE_SECRET}"; // gitleaks:allow\n`);
+  git(dir, ['add', 'package.json', 'src/index.js', 'test/fixture.test.js']);
+
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
+  let npmOnlyStatus = 0;
+  try {
+    execFileSync(process.execPath, [path.join(__dirname, '..', 'bin', 'aiguard.js'), dir, '--npm-only'], { encoding: 'utf8', env });
+  } catch (err) {
+    npmOnlyStatus = err.status;
+  }
+  assert.strictEqual(npmOnlyStatus, 0, '--npm-only must exit 0 — the fixture secret is not npm-published');
+
+  let normalStatus = 0;
+  try {
+    execFileSync(process.execPath, [path.join(__dirname, '..', 'bin', 'aiguard.js'), dir], { encoding: 'utf8', env });
+  } catch (err) {
+    normalStatus = err.status;
+  }
+  assert.strictEqual(normalStatus, 1, 'without --npm-only the same fixture (git-tracked) must still block (exit 1)');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

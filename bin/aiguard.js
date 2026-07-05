@@ -7,6 +7,12 @@ const { scan, scanGitHistory } = require('../src/scanner');
 const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
 const flags = process.argv.slice(2).filter(a => a.startsWith('--'));
 const historyMode = flags.includes('--history');
+// Scan ONLY what `npm pack --dry-run --json` would actually publish — used by
+// `prepublishOnly` so git-tracked-but-not-npm-published fixtures (e.g. test/
+// secret fixtures excluded via package.json "files") don't block `npm
+// publish`. The regular (no-flag) run keeps scanning git ∪ npm, since it also
+// guards against a `git push` leak, not just an npm publish one.
+const npmOnlyMode = flags.includes('--npm-only');
 const projectRoot = args[0] ? path.resolve(args[0]) : process.cwd();
 
 // Refuse to scan home directory — it triggers macOS permission dialogs for
@@ -39,7 +45,7 @@ console.log(`Проект: ${projectRoot}\n`);
 
 let findings;
 try {
-  findings = scan(projectRoot);
+  findings = scan(projectRoot, { npmOnly: npmOnlyMode });
   if (historyMode) {
     console.log('🔍 Проверяю git-историю...\n');
     const historyFindings = scanGitHistory(projectRoot);
