@@ -12,12 +12,17 @@ jobs:
     strategy:
       matrix:
         node-version: [16, 20]
+    # scanGitHistory tests spawn git with GIT_CONFIG_GLOBAL/SYSTEM=/dev/null
+    # for isolation (see test/scanner.test.js), so `git config --global`
+    # is invisible to them — only identity env vars survive that isolation.
+    env:
+      GIT_AUTHOR_NAME: CI
+      GIT_AUTHOR_EMAIL: ci@example.com
+      GIT_COMMITTER_NAME: CI
+      GIT_COMMITTER_EMAIL: ci@example.com
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - run: |
-          git config --global user.email "ci@example.com"
-          git config --global user.name "CI"
       - run: npm test
