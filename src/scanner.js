@@ -194,6 +194,28 @@ function getGitFileList(projectRoot, warnings) {
   });
 }
 
+// Returns the files currently staged for commit (`git diff --cached`), or
+// null if the call itself failed (not a git repo, corrupted index, timeout).
+// Backs --staged: a pre-commit hook wants "scan exactly what's about to be
+// committed" on every commit, not a full publish/tracked-tree scan each
+// time — that full scan was slow and noisy enough that aiguard was never
+// actually wired into pre-commit despite existing for this exact purpose.
+// --diff-filter=ACMR drops deleted files (D) — nothing to scan in a file
+// being removed — and keeps renames (R) so a renamed file's content still
+// gets scanned even when the rename alone carries no other diff.
+function getStagedFiles(projectRoot) {
+  const { execFileSync } = require('child_process');
+  try {
+    const output = execFileSync(
+      'git', ['diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z'],
+      { cwd: projectRoot, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: GIT_COMMAND_TIMEOUT_MS }
+    ).toString('utf8');
+    return output.split('\0').filter(Boolean).map((p) => p.split('/').join(path.sep));
+  } catch (_) {
+    return null;
+  }
+}
+
 // Resolves `relPath` against `root` and returns the absolute path only if it
 // stays inside root. Defense in depth for section 3 in scan() below:
 // publishFiles comes from git/npm's own output, which shouldn't ever contain
@@ -385,6 +407,27 @@ function scan(projectRoot, options) {
   } else {
     const gitFiles = getGitFileList(projectRoot, gitWarnings);
     publishFiles = gitFiles !== null ? gitFiles : walkAllFiles(projectRoot, walkWarnings);
+  }
+
+  // options.files restricts scanning to an explicit list (used by --staged:
+  // a git hook wants "scan exactly what's about to be committed", not the
+  // full npm-publish/git-tracked set — running the full scan on every commit
+  // is what made the tool too slow/noisy to wire into pre-commit at all).
+  // Accepts absolute paths or paths relative to CWD; normalized to the same
+  // root-relative POSIX form publishFiles already uses (git ls-files' own
+  // format), so the AI-folder/secret-file/content-scan logic below needs no
+  // changes — it just sees a shorter publishFiles. Deliberately relative to
+  // projectRoot AS GIVEN, not its realpath (unlike resolveInRoot() below,
+  // used only for the final read/traversal-guard, not this comparison): on
+  // macOS a temp dir under /tmp is itself a symlink to /private/tmp, and
+  // publishFiles' own entries came from git/npm run with cwd=projectRoot —
+  // realpath-ing just this side of the comparison made every path mismatch
+  // and silently filtered out every file (caught by a test, not manually).
+  if (options.files) {
+    const wanted = new Set(
+      options.files.map((f) => path.relative(projectRoot, path.resolve(projectRoot, f)).split(path.sep).join('/'))
+    );
+    publishFiles = publishFiles.filter((f) => wanted.has(f));
   }
 
   const context = isNpmProject ? 'npm-пакет' : 'git-коммит';
@@ -876,4 +919,4 @@ function scanGitHistory(projectRoot) {
   return findings;
 }
 
-module.exports = { scan, scanGitHistory };
+module.exports = { scan, scanGitHistory, getStagedFiles };

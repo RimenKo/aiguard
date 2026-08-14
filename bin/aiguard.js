@@ -2,10 +2,26 @@
 'use strict';
 
 const path = require('path');
-const { scan, scanGitHistory } = require('../src/scanner');
+const { scan, scanGitHistory, getStagedFiles } = require('../src/scanner');
 
 const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
 const flags = process.argv.slice(2).filter(a => a.startsWith('--'));
+
+if (flags.includes('--help') || flags.includes('-h')) {
+  console.log(`aiguard — catches AI-tool secrets and folders before npm publish / git push
+
+Usage:
+  aiguard [path]              Scan a project (default: current directory)
+  aiguard [path] --staged     Scan only files staged for commit (git diff --cached)
+  aiguard [path] --npm-only   Scan only what \`npm pack\` would publish (used by prepublishOnly)
+  aiguard [path] --history    Also scan the full git history for leaked secrets
+  aiguard --help              Show this help
+
+Exit code: 0 = clean, 1 = blocked (secrets or AI-tool folders found).
+`);
+  process.exit(0);
+}
+
 const historyMode = flags.includes('--history');
 // Scan ONLY what `npm pack --dry-run --json` would actually publish — used by
 // `prepublishOnly` so git-tracked-but-not-npm-published fixtures (e.g. test/
@@ -13,6 +29,9 @@ const historyMode = flags.includes('--history');
 // publish`. The regular (no-flag) run keeps scanning git ∪ npm, since it also
 // guards against a `git push` leak, not just an npm publish one.
 const npmOnlyMode = flags.includes('--npm-only');
+// Scan ONLY files staged for commit — for a pre-commit hook that must run on
+// every commit without re-scanning the whole tree each time.
+const stagedMode = flags.includes('--staged');
 const projectRoot = args[0] ? path.resolve(args[0]) : process.cwd();
 
 // Refuse to scan home directory — it triggers macOS permission dialogs for
@@ -45,7 +64,16 @@ console.log(`Проект: ${projectRoot}\n`);
 
 let findings;
 try {
-  findings = scan(projectRoot, { npmOnly: npmOnlyMode });
+  const scanOptions = { npmOnly: npmOnlyMode };
+  if (stagedMode) {
+    const staged = getStagedFiles(projectRoot);
+    if (staged === null) {
+      console.error('⛔  --staged: не удалось получить список застейдженных файлов (не git-репозиторий, повреждённый индекс или сбой git).');
+      process.exit(1);
+    }
+    scanOptions.files = staged;
+  }
+  findings = scan(projectRoot, scanOptions);
   if (historyMode) {
     console.log('🔍 Проверяю git-историю...\n');
     const historyFindings = scanGitHistory(projectRoot);

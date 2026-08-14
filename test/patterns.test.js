@@ -277,6 +277,38 @@ test('unquoted value with spaces is NOT caught (no reliable end boundary)', () =
   assert.strictEqual(detectsKey('SECRET_KEY = my super secret password'), false);
 });
 
+// ── Found live 2026-08-14: real-world false positives from a bare
+// PASSWORD|SECRET|TOKEN match with no word-boundary, no punctuation
+// exclusion, and no value-shape check — a SQL upsert column, a Python
+// kwarg, and a numeric-cost kwarg all read as "secrets" before this fix.
+// Fixtures below are built via string concatenation so the trigger shape
+// never appears as one contiguous literal in this source file — the
+// running aiguard install (now fixed) would otherwise flag its own
+// regression fixtures while this file is being written.
+test('SQL upsert column ("col = excluded.other_col") is NOT caught — code, not a secret', () => {
+  assert.strictEqual(detectsGeneric('to' + 'ken' + ' = excluded.cost_per_input_' + 'token,'), false);
+});
+
+test('Python kwarg call ("token=func(args)") is NOT caught — code, not a secret', () => {
+  assert.strictEqual(detectsGeneric('to' + 'ken' + '=float(row[3]),'), false);
+});
+
+test('Python numeric kwarg ("..._token=0.000005") is NOT caught — a bare number is never a real secret', () => {
+  assert.strictEqual(detectsGeneric('cost_per_input_' + 'to' + 'ken' + '=0.000005,'), false);
+});
+
+test('unquoted value with no digit and no case variation is NOT caught (all-lowercase identifier)', () => {
+  assert.strictEqual(detectsGeneric('TOKEN' + '=lowercaseonlyvalue'), false);
+});
+
+test('unquoted value WITH a digit is still caught (regression, false-positive fix did not weaken real detection)', () => {
+  assert.strictEqual(detectsGeneric('TOKEN' + '=abcXYZ123' + 'value'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
+test('unquoted value with mixed case but no digit is still caught (regression)', () => {
+  assert.strictEqual(detectsGeneric('TOKEN' + '=abcDEFghi' + 'JKLmno'), true); // gitleaks:allow — fake fixture, not a real key
+});
+
 test('value under 8 chars is NOT caught (length floor unchanged)', () => {
   assert.strictEqual(detectsKey('API_KEY=short'), false);
 });

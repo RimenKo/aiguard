@@ -968,5 +968,61 @@ test('scan() reports every instance of a repeated secret in the same file, not j
   );
 });
 
+// ── --staged: options.files restricts scan() to an explicit file list ──
+// Added 2026-08-14 so a git hook can scan exactly what's about to be
+// committed instead of the full publish/tracked-file set on every commit —
+// the full-tree scan was slow and noisy enough that aiguard was never
+// actually wired into pre-commit despite existing for this exact purpose.
+test('scan(): options.files restricts findings to only the listed files, even with other secrets in the tree', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'a.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, 'b.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', 'a.js', 'b.js']);
+
+  const restricted = scanIsolatedWith(dir, { files: ['a.js'] });
+  assert.strictEqual(findingsFor(restricted, 'a.js').length, 1, 'the listed file must still be scanned');
+  assert.strictEqual(
+    findingsFor(restricted, 'b.js').length, 0,
+    'a file not in options.files must not be scanned, even though it has the same secret and is git-tracked'
+  );
+
+  const full = scanIsolated(dir);
+  assert.strictEqual(findingsFor(full, 'b.js').length, 1, 'control: without options.files, b.js is reported normally');
+});
+
+// ── --staged end-to-end via the real CLI ──
+test('CLI: aiguard.js --staged flags a secret in a staged file but not one that is tracked-and-modified-but-unstaged', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'clean.js', 'module.exports = 1;\n');
+  git(dir, ['add', 'clean.js']);
+  git(dir, ['commit', '--quiet', '-m', 'baseline']);
+
+  writeFile(dir, 'staged-leak.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', 'staged-leak.js']);
+
+  // git-tracked (staged then unstaged again) but NOT part of the pending commit.
+  writeFile(dir, 'unstaged-leak.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', 'unstaged-leak.js']);
+  git(dir, ['reset', '--quiet', 'unstaged-leak.js']);
+
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+  let status = 0;
+  let output = '';
+  try {
+    output = execFileSync(process.execPath, [path.join(__dirname, '..', 'bin', 'aiguard.js'), dir, '--staged'], { encoding: 'utf8', env });
+  } catch (err) {
+    status = err.status;
+    output = err.stdout || '';
+  }
+  assert.strictEqual(status, 1, '--staged must block on the staged secret (exit 1)');
+  assert.ok(output.includes('staged-leak.js'), '--staged output must name the staged file');
+  assert.ok(
+    !output.includes('unstaged-leak.js'),
+    '--staged output must NOT mention the unstaged-but-tracked file, even though a normal scan would find it'
+  );
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

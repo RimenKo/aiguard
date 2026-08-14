@@ -217,7 +217,31 @@ const SECRET_PATTERNS = [
     // Value: a quoted string may contain spaces ("my super secret
     // password"); an unquoted one may not — an unquoted value with spaces
     // has no reliable end boundary and would swallow surrounding code.
-    regex: /(?:PASSWORD|SECRET|TOKEN)\s*[=:]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s"']{8,})/gi,
+    // The unquoted branch also excludes ()[]{}<>,; — real secret values
+    // are never `float(row[3])` or `excluded.col,`; those are code, and
+    // without this exclusion the match swallows past the syntax and still
+    // clears the {8,} floor (found live: a Python kwarg and a SQL upsert
+    // column both matched as "secrets" before this fix).
+    regex: /(?:PASSWORD|SECRET|TOKEN)\s*[=:]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s"'(),;{}\[\]<>]{8,})/gi,
+    // Quoted values keep the old behavior unchanged (a human-typed spaced
+    // passphrase in quotes is still a plausible real secret). Unquoted
+    // values additionally need a digit or mixed case — virtually every real
+    // credential format (hex, base64, JWT, vendor API keys) has one; a
+    // plain lowercase.dotted_identifier_chain (SQL "col = excluded.other",
+    // a python kwarg name) reads as code/English words, not a secret — and
+    // a plain decimal number (a numeric-cost kwarg whose name happens to
+    // end in one of the three trigger words, matched because there's no
+    // word-boundary before PASSWORD/SECRET/TOKEN so it also fires on
+    // identifiers merely ending in one of them) is rejected outright, since
+    // no real secret is ever written as a bare float. Only an all-lowercase,
+    // no-digit passphrase slips past this — an accepted trade-off for the
+    // generic catch-all; dedicated provider patterns above are untouched.
+    validate: (match) => {
+      const value = match.replace(/^(?:PASSWORD|SECRET|TOKEN)\s*[=:]\s*/i, '');
+      if (/^["'].*["']$/.test(value)) return true;
+      if (/^-?\d+(?:\.\d+)?$/.test(value)) return false;
+      return /\d/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value));
+    },
   },
   {
     name: 'Generic secret key (*_KEY)',
