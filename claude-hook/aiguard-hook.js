@@ -11,11 +11,13 @@
 const path = require('path');
 const fs = require('fs');
 
-// Fail-closed on require error: if patterns can't load, block the operation.
-// Silently passing writes when the security check can't run defeats the purpose.
-let SECRET_PATTERNS;
+// Fail-closed on require error: if patterns or the shared allow/ignore
+// helpers can't load, block the operation. Silently passing writes when
+// the security check can't run defeats the purpose.
+let SECRET_PATTERNS, matchIsAllowed, isFileIgnored;
 try {
   ({ SECRET_PATTERNS } = require(path.join(__dirname, '..', 'src', 'patterns')));
+  ({ matchIsAllowed, isFileIgnored } = require(path.join(__dirname, '..', 'src', 'allow')));
 } catch (err) {
   process.stderr.write(`aiguard: не удалось загрузить паттерны — ${err.message}\nОперация заблокирована.\n`);
   process.exit(2);
@@ -61,6 +63,13 @@ try {
   const content = texts.join('\n');
   if (!content) process.exit(0);
 
+  // .aiguardignore: a file listed there is not scanned at all — same rule
+  // as the publish-time CLI. Checked before the pattern loop so an ignored
+  // path can contain any fixture without blocking the write. file_path is
+  // Write/Edit/MultiEdit; notebook_path is NotebookEdit.
+  const targetPath = ti.file_path || ti.notebook_path;
+  if (targetPath && isFileIgnored(targetPath)) process.exit(0);
+
   // Cap scanned size: this is an interactive write-time hook (blocks the
   // editor until it exits), not the publish-time scan, so it must return in a
   // fraction of a second, not tolerate the scanner's 5 MB ceiling
@@ -95,7 +104,10 @@ try {
     let m;
     while ((m = regex.exec(content)) !== null) {
       if (m[0].length === 0) { regex.lastIndex++; continue; }
-      if (validate && !validate(m[0])) continue;
+      if (validate) {
+        try { if (!validate(m[0])) continue; } catch (_) { continue; }
+      }
+      if (matchIsAllowed(content, m.index, m[0].length, validate)) continue;
       let severity = 'HIGH';
       if (severityOverride) {
         try { severity = severityOverride(m[0]) ?? severity; } catch (_) { severity = 'HIGH'; }

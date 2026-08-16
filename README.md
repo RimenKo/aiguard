@@ -112,6 +112,24 @@ aiguard /path/to/project --history
 - `0` — clean or warnings only
 - `1` — CRITICAL or HIGH findings (publish blocked)
 
+### Suppressing false positives
+
+Intentional secret-shaped fixtures (tests, docs that quote a pattern) can be silenced without turning the detector off.
+
+**Same-line marker** — put `aiguard:allow` on the line that would otherwise match (typically in a comment). `gitleaks:allow` is accepted as an alias, so existing gitleaks comments work as-is. The marker is pinpoint: it does not suppress a match on the next line or in another file.
+
+```js
+const demo = "AKIAABCDEFGHIJKLMNOP"; // aiguard:allow gitleaks:allow — fixture, not a real key
+```
+
+**`.aiguardignore`** — a gitignore-style list of paths/globs at the project root. Matching files are not scanned at all (CLI and the Claude Code Write/Edit hook use the same rules).
+
+```
+# .aiguardignore
+test/fixtures/
+docs/examples/*.env
+```
+
 **Example output:**
 
 ```
@@ -265,6 +283,7 @@ Strings labeled as keys/tokens are decoded from Base64, then the decoded value i
 - Binary files, images, PDFs
 - Files larger than 5 MB (skipped for performance — flagged with a warning, not silently ignored)
 - Non-standard secret formats with no known prefix
+- Lines marked `aiguard:allow` / `gitleaks:allow`, and paths listed in `.aiguardignore`
 
 ---
 

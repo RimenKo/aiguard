@@ -1,15 +1,18 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
 const HOOK = path.join(__dirname, '..', 'claude-hook', 'aiguard-hook.js');
 
-function runHook(toolInput) {
+function runHook(toolInput, extra) {
   return spawnSync(process.execPath, [HOOK], {
     input: JSON.stringify({ tool_input: toolInput }),
     encoding: 'utf8',
+    cwd: extra && extra.cwd,
   });
 }
 
@@ -287,6 +290,89 @@ function runHookRaw(rawInput) {
     `[fail-fast on first secret] hook must stop at the first secret and NOT also report the second (GitHub token), got: ${r.stderr}`
   );
   console.log('✓ Write: two different secrets → hook blocks and reports only the first, not both (README: hook ≠ "reports ALL instances")');
+  passed++;
+}
+
+// ── aiguard:allow / .aiguardignore — same rules as the publish-time CLI ──
+// Fixture lives in a variable so this source file can mark the definition
+// line and not trip the live write hook while still sending an unmarked
+// secret to the hook process under test.
+const AWS_HOOK_FIXTURE = 'AKIAABCDEFGHIJKLMNOP'; // aiguard:allow gitleaks:allow — fake fixture, not a real key
+
+check(
+  'Write: AWS key without marker → blocked',
+  { file_path: 'env.js', content: `key = ${AWS_HOOK_FIXTURE}` },
+  2,
+);
+
+check(
+  'Write: same AWS key with aiguard:allow on the same line → allowed',
+  { file_path: 'env.js', content: `key = ${AWS_HOOK_FIXTURE} // aiguard:allow` },
+  0,
+);
+
+check(
+  'Edit: same AWS key with gitleaks:allow alias → allowed',
+  { file_path: 'env.js', old_string: 'placeholder', new_string: `key = ${AWS_HOOK_FIXTURE} // gitleaks:allow` },
+  0,
+);
+
+{
+  const seed = SEED_WORDS.join(' ');
+  check(
+    'Write: BIP39 seed followed by a next-line aiguard:allow → still blocked (greedy overshoot)',
+    { file_path: 'notes.txt', content: `${seed}\naiguard:allow` },
+    2,
+  );
+}
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiguard-hook-ignore-'));
+  fs.writeFileSync(path.join(dir, '.aiguardignore'), 'ignored-secret.js\n');
+  const r = runHook(
+    { file_path: 'ignored-secret.js', content: `key = ${AWS_HOOK_FIXTURE}` },
+    { cwd: dir },
+  );
+  assert.strictEqual(
+    r.status, 0,
+    `[Write: path in .aiguardignore] expected exit 0 (file not scanned), got ${r.status}\nstderr: ${r.stderr}`
+  );
+  console.log('✓ Write: file listed in .aiguardignore is not scanned (unmarked secret allowed)');
+  passed++;
+
+  const r2 = runHook(
+    { file_path: 'other.js', content: `key = ${AWS_HOOK_FIXTURE}` },
+    { cwd: dir },
+  );
+  assert.strictEqual(
+    r2.status, 2,
+    `[Write: sibling file not in .aiguardignore] expected exit 2, got ${r2.status}\nstderr: ${r2.stderr}`
+  );
+  console.log('✓ Write: sibling file not listed in .aiguardignore is still blocked');
+  passed++;
+
+  const r3 = runHook(
+    { file_path: '.aiguardignore', content: `key = ${AWS_HOOK_FIXTURE}` },
+    { cwd: dir },
+  );
+  assert.strictEqual(
+    r3.status, 2,
+    `[Write: .aiguardignore itself] expected exit 2 (ignore file is never skipped), got ${r3.status}\nstderr: ${r3.stderr}`
+  );
+  console.log('✓ Write: .aiguardignore itself is still scanned (never self-ignored)');
+  passed++;
+
+  const broken = fs.mkdtempSync(path.join(os.tmpdir(), 'aiguard-hook-badglob-'));
+  fs.writeFileSync(path.join(broken, '.aiguardignore'), '[]\n');
+  const r4 = runHook(
+    { file_path: 'clean.js', content: 'console.log("ok")' },
+    { cwd: broken },
+  );
+  assert.strictEqual(
+    r4.status, 0,
+    `[Write: broken .aiguardignore glob] expected exit 0, got ${r4.status}\nstderr: ${r4.stderr}`
+  );
+  console.log('✓ Write: broken .aiguardignore glob does not lock the hook');
   passed++;
 }
 

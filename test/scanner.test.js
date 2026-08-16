@@ -533,6 +533,60 @@ test('scanGitHistory: git log itself fails (corrupted branch ref) — visible wa
   assert.strictEqual(failed[0].severity, 'WARN');
 });
 
+test('scanGitHistory: .aiguardignore path is not scanned in history either', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.aiguardignore', 'ignored.js\n');
+  writeFile(dir, 'ignored.js', `const key = "${FAKE_SECRET}";\n`);
+  // Distinct AWS-shaped value so a miss of the ignore filter cannot hide
+  // behind scanGitHistory's dedup-by-raw-value (same secret in two files
+  // would collapse to one finding either way).
+  const keptSecret = 'ASIAABCDEFGHIJKLMNOP'; // aiguard:allow gitleaks:allow — fake fixture
+  writeFile(dir, 'kept.js', `const other = "${keptSecret}";\n`);
+  git(dir, ['add', '.aiguardignore', 'ignored.js', 'kept.js']);
+  git(dir, ['commit', '--quiet', '-m', 'add both']);
+
+  const hits = scanGitHistory(dir).filter((f) => f.type === 'secret_pattern');
+  assert.strictEqual(hits.length, 1, 'history must report only the non-ignored file\'s secret');
+  assert.ok(hits[0]._raw === keptSecret, 'the reported history secret must be the one from kept.js, not ignored.js');
+});
+
+test('scanGitHistory: quoted path with a space is not swallowed by a previous ignored file', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.aiguardignore', 'ignored.js\n');
+  writeFile(dir, 'ignored.js', `const key = "${FAKE_SECRET}";\n`);
+  const seed = [
+    'laptop', 'alien', 'romance', 'cereal', 'fruit', 'absent',
+    'unique', 'craft', 'always', 'noodle', 'heart', 'wheel',
+  ].join(' ');
+  writeFile(dir, 'my seed.txt', seed + '\n');
+  git(dir, ['add', '.aiguardignore', 'ignored.js', 'my seed.txt']);
+  git(dir, ['commit', '--quiet', '-m', 'ignored plus spaced seed name']);
+
+  const hits = scanGitHistory(dir).filter((f) => f.type === 'secret_pattern');
+  assert.ok(
+    hits.length > 0,
+    'a seed in a quoted +++ "b/my seed.txt" path must still be found after an ignored sibling'
+  );
+});
+
+test('scanGitHistory: aiguard:allow in a different file of the same commit does not suppress a seed', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  const seed = [
+    'laptop', 'alien', 'romance', 'cereal', 'fruit', 'absent',
+    'unique', 'craft', 'always', 'noodle', 'heart', 'wheel',
+  ].join(' ');
+  writeFile(dir, 'seed.txt', seed + '\n');
+  writeFile(dir, 'note.txt', 'aiguard:allow\n');
+  git(dir, ['add', 'seed.txt', 'note.txt']);
+  git(dir, ['commit', '--quiet', '-m', 'seed and marker in different files']);
+
+  const hits = scanGitHistory(dir).filter((f) => f.type === 'secret_pattern');
+  assert.ok(hits.length > 0, 'a marker in another file of the same commit must not suppress the seed');
+});
+
 // ── File size limit: a huge file must be skipped, fast, with a visible warning ─
 test('file over the size limit is skipped without scanning (fast, and a WARN names why)', () => {
   const dir = makeTempProject();
@@ -902,7 +956,7 @@ test('npmOnly: git-tracked file excluded from npm "files" is not reported at all
   writeFile(dir, 'src/index.js', 'module.exports = 1;\n');
   // Mirrors the real aiguard repo: a test fixture with an intentional fake
   // secret, git-tracked, but outside package.json "files" so npm never ships it.
-  writeFile(dir, 'test/fixture.test.js', `const key = "${FAKE_SECRET}"; // gitleaks:allow\n`);
+  writeFile(dir, 'test/fixture.test.js', `const key = "${FAKE_SECRET}";\n`);
   git(dir, ['add', 'package.json', 'src/index.js', 'test/fixture.test.js']);
 
   const npmOnlyFindings = scanIsolatedWith(dir, { npmOnly: true });
@@ -924,7 +978,7 @@ test('CLI: aiguard.js --npm-only exits 0 when the only secret is in a file npm "
   initGitRepo(dir);
   writeFile(dir, 'package.json', JSON.stringify({ name: 'tmp-pkg-npmonly-cli', version: '1.0.0', files: ['src'] }));
   writeFile(dir, 'src/index.js', 'module.exports = 1;\n');
-  writeFile(dir, 'test/fixture.test.js', `const key = "${FAKE_SECRET}"; // gitleaks:allow\n`);
+  writeFile(dir, 'test/fixture.test.js', `const key = "${FAKE_SECRET}";\n`);
   git(dir, ['add', 'package.json', 'src/index.js', 'test/fixture.test.js']);
 
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
@@ -1022,6 +1076,97 @@ test('CLI: aiguard.js --staged flags a secret in a staged file but not one that 
     !output.includes('unstaged-leak.js'),
     '--staged output must NOT mention the unstaged-but-tracked file, even though a normal scan would find it'
   );
+});
+
+// ── aiguard:allow + .aiguardignore (false-positive suppression) ──
+test('scan(): line with aiguard:allow is not reported; same pattern in another file without the marker still is', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, 'marked.js', `const key = "${FAKE_SECRET}"; // aiguard:allow\n`);
+  writeFile(dir, 'unmarked.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', 'marked.js', 'unmarked.js']);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'marked.js').length, 0,
+    'a line carrying aiguard:allow must not be reported'
+  );
+  assert.strictEqual(
+    findingsFor(findings, 'unmarked.js').length, 1,
+    'the same pattern without a marker in another file must still be reported'
+  );
+});
+
+test('scan(): .aiguardignore path is not scanned at all, even without a line marker', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.aiguardignore', 'ignored.js\n');
+  writeFile(dir, 'ignored.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, 'kept.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', '.aiguardignore', 'ignored.js', 'kept.js']);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(
+    findingsFor(findings, 'ignored.js').length, 0,
+    'a file listed in .aiguardignore must not be scanned'
+  );
+  assert.strictEqual(
+    findingsFor(findings, 'kept.js').length, 1,
+    'a sibling file not listed in .aiguardignore must still be reported'
+  );
+});
+
+test('scan(): .aiguardignore glob (fixtures/*.js) skips matching files only', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.aiguardignore', 'fixtures/*.js\n');
+  writeFile(dir, 'fixtures/sample.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, 'src/app.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', '.aiguardignore', 'fixtures/sample.js', 'src/app.js']);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(findingsFor(findings, 'fixtures/sample.js').length, 0);
+  assert.strictEqual(findingsFor(findings, 'src/app.js').length, 1);
+});
+
+test('scan(): UTF-8 BOM on .aiguardignore does not break an otherwise matching path', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.aiguardignore', '\uFEFFignored.js\n');
+  writeFile(dir, 'ignored.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, 'kept.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', '.aiguardignore', 'ignored.js', 'kept.js']);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(findingsFor(findings, 'ignored.js').length, 0, 'BOM-prefixed rule must still match ignored.js');
+  assert.strictEqual(findingsFor(findings, 'kept.js').length, 1);
+});
+
+test('scan(): escaped asterisk (\\*.js) is a literal name, not "ignore every .js file"', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.aiguardignore', '\\*.js\n');
+  writeFile(dir, 'star.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, '*.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', '.aiguardignore', 'star.js', '*.js']);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(findingsFor(findings, 'star.js').length, 1, '\\*.js must not ignore star.js');
+  assert.strictEqual(findingsFor(findings, '*.js').length, 0, '\\*.js must ignore the file literally named *.js');
+});
+
+test('scan(): broken .aiguardignore glob does not crash and does not skip other files', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.aiguardignore', '[]\nkept-out.js\n');
+  writeFile(dir, 'kept-out.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, 'kept.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', '.aiguardignore', 'kept-out.js', 'kept.js']);
+
+  let findings;
+  assert.doesNotThrow(() => { findings = scanIsolated(dir); });
+  assert.strictEqual(findingsFor(findings, 'kept-out.js').length, 0, 'a valid rule next to a broken one still applies');
+  assert.strictEqual(findingsFor(findings, 'kept.js').length, 1, 'a broken glob must not abort the scan of other files');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

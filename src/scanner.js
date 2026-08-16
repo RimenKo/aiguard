@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { AI_FOLDERS, AI_SECRET_FILES, SECRET_PATTERNS } = require('./patterns');
+const { matchIsAllowed, loadIgnoreRules, isPathIgnored } = require('./allow');
 
 /**
  * Returns list of files that will be included in npm publish.
@@ -430,6 +431,21 @@ function scan(projectRoot, options) {
     publishFiles = publishFiles.filter((f) => wanted.has(f));
   }
 
+  // .aiguardignore at the scan root — gitignore-style path/glob list.
+  // Matching files are dropped from publishFiles so they are not content-
+  // scanned and do not contribute to AI-folder / AI-secret-file findings.
+  // Applied after options.files so an explicit --staged path is still
+  // skippable: the ignore file is a pinpoint "do not scan this" switch,
+  // not something --staged should override.
+  const ignoreRules = loadIgnoreRules(projectRoot);
+  if (ignoreRules.length) {
+    publishFiles = publishFiles.filter((f) => {
+      const posix = String(f).split(/[\\/]/).join('/');
+      if (posix === '.aiguardignore') return true;
+      return !isPathIgnored(f, ignoreRules);
+    });
+  }
+
   const context = isNpmProject ? 'npm-пакет' : 'git-коммит';
   // True only when npm pack --dry-run itself succeeded — i.e. npmConfirmedFiles
   // is a trustworthy "npm will really publish exactly this" answer, not an
@@ -502,6 +518,7 @@ function scan(projectRoot, options) {
 
   // 2. Check known AI secret files
   for (const secretFile of AI_SECRET_FILES) {
+    if (ignoreRules.length && isPathIgnored(secretFile, ignoreRules)) continue;
     const full = path.join(projectRoot, secretFile);
     if (!fs.existsSync(full)) continue;
 
@@ -666,6 +683,7 @@ function scanContent(filePath, content, severity) {
       if (validate) {
         try { if (!validate(m[0])) continue; } catch (_) { continue; }
       }
+      if (matchIsAllowed(content, m.index, m[0].length, validate)) continue;
       let finalSeverity = severity;
       if (severityOverride) {
         try { finalSeverity = severityOverride(m[0]) ?? severity; } catch (_) { finalSeverity = severity; }
@@ -888,30 +906,46 @@ function scanGitHistory(projectRoot) {
     }];
   }
 
-  // Parse into {sha, addedLines} blocks
+  // Parse into {sha, addedLines} blocks. Track the current diff path from
+  // `+++ b/<file>` so .aiguardignore applies here too — "not scanned at all"
+  // includes history, not just the working-tree pass.
+  const ignoreRules = loadIgnoreRules(projectRoot);
   const blocks = [];
   let current = null;
+  let currentFile = '';
   for (const line of logOutput.split('\n')) {
     if (line.startsWith('COMMIT:')) {
-      current = { sha: line.slice(7, 15), lines: [] };
+      current = { sha: line.slice(7, 15), files: new Map() };
+      currentFile = '';
       blocks.push(current);
+    } else if (current && line.startsWith('diff --git ')) {
+      // A new file's `+++` may be quoted (`+++ "b/my seed.txt"`) and
+      // would not update currentFile below — reset so those added lines
+      // are not attributed to (and dropped with) the previous ignored file.
+      currentFile = '';
+    } else if (current && line.startsWith('+++ ')) {
+      currentFile = parseDiffNewPath(line);
     } else if (current && line.startsWith('+') && !line.startsWith('+++')) {
-      current.lines.push(line.slice(1));
+      if (currentFile && ignoreRules.length && isPathIgnored(currentFile, ignoreRules)) continue;
+      if (!current.files.has(currentFile)) current.files.set(currentFile, []);
+      current.files.get(currentFile).push(line.slice(1));
     }
   }
 
-  // Scan each commit block, deduplicate by raw matched value (pre-mask).
-  // Using the raw value avoids false collisions when two different secrets
-  // produce the same masked detail (e.g. two AWS keys with same prefix/length).
+  // Scan each file's added lines separately. Joining a whole commit into
+  // one string let a marker (or a greedy BIP39 overshoot) in file B
+  // suppress a real secret in file A of the same commit.
   const seen = new Set();
-  for (const { sha, lines } of blocks) {
-    if (!lines.length) continue;
-    const hits = scanContent(`git:коммит ${sha}`, lines.join('\n'), 'HIGH');
-    for (const hit of hits) {
-      const key = hit._raw;
-      if (!seen.has(key)) {
-        seen.add(key);
-        findings.push(hit);
+  for (const { sha, files } of blocks) {
+    for (const lines of files.values()) {
+      if (!lines.length) continue;
+      const hits = scanContent(`git:коммит ${sha}`, lines.join('\n'), 'HIGH');
+      for (const hit of hits) {
+        const key = hit._raw;
+        if (!seen.has(key)) {
+          seen.add(key);
+          findings.push(hit);
+        }
       }
     }
   }
@@ -919,4 +953,44 @@ function scanGitHistory(projectRoot) {
   return findings;
 }
 
-module.exports = { scan, scanGitHistory, getStagedFiles };
+// Git quotes unusual names (`+++ "b/my seed.txt"`) when core.quotepath is
+// on (the default). An unrecognized +++ must return '' so added lines are
+// still scanned (fail-closed), not inherited from the previous file.
+function parseDiffNewPath(line) {
+  const raw = line.replace(/\r$/, '');
+  if (raw === '+++ /dev/null') return '';
+  if (raw.startsWith('+++ b/')) return raw.slice(6);
+  if (raw.startsWith('+++ "b/')) {
+    let quoted = raw.slice(7);
+    if (quoted.endsWith('"')) quoted = quoted.slice(0, -1);
+    return unescapeGitQuotedPath(quoted);
+  }
+  return '';
+}
+
+function unescapeGitQuotedPath(s) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '\\' || i + 1 >= s.length) { out += s[i]; continue; }
+    const n = s[i + 1];
+    if (n === '\\' || n === '"') { out += n; i++; continue; }
+    if (n === 't') { out += '\t'; i++; continue; }
+    if (n === 'n') { out += '\n'; i++; continue; }
+    if (n === 'r') { out += '\r'; i++; continue; }
+    if (n >= '0' && n <= '7') {
+      let oct = n;
+      let j = i + 2;
+      while (oct.length < 3 && j < s.length && s[j] >= '0' && s[j] <= '7') {
+        oct += s[j];
+        j++;
+      }
+      out += String.fromCharCode(parseInt(oct, 8));
+      i = j - 1;
+      continue;
+    }
+    out += s[i];
+  }
+  return out;
+}
+
+module.exports = { scan, scanGitHistory, getStagedFiles, scanContent };

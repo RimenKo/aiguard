@@ -17,6 +17,11 @@ Usage:
   aiguard [path] --history    Also scan the full git history for leaked secrets
   aiguard --help              Show this help
 
+Suppression (same rules in this CLI and in the Claude Code write hook):
+  aiguard:allow     put on the same line (typically in a comment) to skip that finding
+  gitleaks:allow    accepted as an alias — same meaning
+  .aiguardignore    gitignore-style path/glob list at the project root; matching files are not scanned
+
 Exit code: 0 = clean, 1 = blocked (secrets or AI-tool folders found).
 `);
   process.exit(0);

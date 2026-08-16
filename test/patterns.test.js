@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { SECRET_PATTERNS } = require('../src/patterns');
+const { scanContent } = require('../src/scanner');
 
 const mnemonicPattern = SECRET_PATTERNS.find((p) => p.name === 'Crypto mnemonic (BIP39 seed)');
 assert.ok(mnemonicPattern, 'Crypto mnemonic (BIP39 seed) pattern not found in patterns.js');
@@ -418,6 +419,72 @@ test('lowercase cache_key_id is NOT caught (false-positive guard unchanged after
 
 test('lowercase primary_key_id is NOT caught (false-positive guard unchanged after *_KEY_ID extension)', () => {
   assert.strictEqual(detectsKey('primary_key_id = "abcdefgh12345678"'), false); // gitleaks:allow — fake fixture, not a real key
+});
+
+// ── aiguard:allow — same-line marker suppresses a finding that the same
+// pattern still reports without the marker. Uses scanContent() (the path
+// both the CLI and, via the same helper, the write hook consult) rather
+// than detectsWith(), because the marker is a scanner-layer rule, not a
+// regex change. Fixture value lives in a variable so this source line
+// itself can carry a marker and not trip the live write hook.
+const AWS_ALLOW_FIXTURE = 'AKIAABCDEFGHIJKLMNOP'; // aiguard:allow gitleaks:allow — fake fixture, not a real key
+
+test('line with aiguard:allow is not flagged by the same pattern that flags the unmarked line', () => {
+  const unmarked = `const key = "${AWS_ALLOW_FIXTURE}";`;
+  const marked = `const key = "${AWS_ALLOW_FIXTURE}"; // aiguard:allow`;
+  assert.ok(
+    scanContent('fixture.js', unmarked, 'HIGH').some((f) => f.type === 'secret_pattern'),
+    'control: unmarked AWS-shaped key must still be reported'
+  );
+  assert.strictEqual(
+    scanContent('fixture.js', marked, 'HIGH').filter((f) => f.type === 'secret_pattern').length,
+    0,
+    'same key on a line with aiguard:allow must not be reported'
+  );
+});
+
+test('aiguard:allow on a neighboring line does not suppress the match (marker is not a nearby switch)', () => {
+  const content = `// aiguard:allow\nconst key = "${AWS_ALLOW_FIXTURE}";`;
+  assert.ok(
+    scanContent('fixture.js', content, 'HIGH').some((f) => f.type === 'secret_pattern'),
+    'a marker on the previous line must not suppress a finding on the next line'
+  );
+});
+
+test('gitleaks:allow is accepted as an alias of aiguard:allow', () => {
+  const marked = `const key = "${AWS_ALLOW_FIXTURE}"; // gitleaks:allow`;
+  assert.strictEqual(
+    scanContent('fixture.js', marked, 'HIGH').filter((f) => f.type === 'secret_pattern').length,
+    0,
+    'gitleaks:allow on the same line must suppress the finding'
+  );
+});
+
+test('aiguard:allow on a CR-only previous line does not suppress the next line', () => {
+  const content = `// aiguard:allow\rconst key = "${AWS_ALLOW_FIXTURE}";`;
+  assert.ok(
+    scanContent('fixture.js', content, 'HIGH').some((f) => f.type === 'secret_pattern'),
+    'a CR-separated previous line with a marker must not suppress the next line'
+  );
+});
+
+test('BIP39 seed is still flagged when the next line is a bare aiguard:allow (greedy overshoot)', () => {
+  const seed = words(12).join(' ');
+  const content = `${seed}\naiguard:allow`;
+  assert.ok(
+    scanContent('fixture.js', content, 'HIGH').some((f) => f.type === 'secret_pattern'),
+    'a marker on the line after a seed must not suppress the seed (greedy {11,} can swallow "aiguard")'
+  );
+});
+
+test('BIP39 seed on one line with aiguard:allow is still suppressed', () => {
+  const seed = words(12).join(' ');
+  const content = `${seed} // aiguard:allow`;
+  assert.strictEqual(
+    scanContent('fixture.js', content, 'HIGH').filter((f) => f.type === 'secret_pattern').length,
+    0,
+    'a marker on the same line as the seed must still suppress it'
+  );
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
