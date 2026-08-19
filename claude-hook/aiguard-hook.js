@@ -7,6 +7,7 @@
 //
 // Path assumptions: this file lives at <pkg-root>/claude-hook/aiguard-hook.js
 // so ../src/patterns is always resolvable both in dev and when installed.
+// leakward-hook.js is the public name and just requires this file.
 
 const path = require('path');
 const fs = require('fs');
@@ -19,7 +20,7 @@ try {
   ({ SECRET_PATTERNS } = require(path.join(__dirname, '..', 'src', 'patterns')));
   ({ matchIsAllowed, isFileIgnored } = require(path.join(__dirname, '..', 'src', 'allow')));
 } catch (err) {
-  process.stderr.write(`aiguard: не удалось загрузить паттерны — ${err.message}\nОперация заблокирована.\n`);
+  process.stderr.write(`leakward: не удалось загрузить паттерны — ${err.message}\nОперация заблокирована.\n`);
   process.exit(2);
 }
 
@@ -63,7 +64,7 @@ try {
   const content = texts.join('\n');
   if (!content) process.exit(0);
 
-  // .aiguardignore: a file listed there is not scanned at all — same rule
+  // .leakwardignore / .aiguardignore: a file listed there is not scanned at all — same rule
   // as the publish-time CLI. Checked before the pattern loop so an ignored
   // path can contain any fixture without blocking the write. file_path is
   // Write/Edit/MultiEdit; notebook_path is NotebookEdit.
@@ -80,7 +81,7 @@ try {
   // the hook itself the productivity problem it's meant to avoid.
   const MAX_CONTENT_SIZE_BYTES = 1 * 1024 * 1024;
   if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_SIZE_BYTES) {
-    process.stderr.write(`aiguard: содержимое больше ${MAX_CONTENT_SIZE_BYTES / (1024 * 1024)} МБ — не проверено на секреты (лимит интерактивного хука).\n`);
+    process.stderr.write(`leakward: содержимое больше ${MAX_CONTENT_SIZE_BYTES / (1024 * 1024)} МБ — не проверено на секреты (лимит интерактивного хука).\n`);
     process.exit(0);
   }
 
@@ -113,14 +114,14 @@ try {
         try { severity = severityOverride(m[0]) ?? severity; } catch (_) { severity = 'HIGH'; }
       }
       if (severity === 'WARN') {
-        process.stderr.write(`aiguard: похоже на секрет (${name}), но низкая уверенность — не заблокировано.\n`);
+        process.stderr.write(`leakward: похоже на секрет (${name}), но низкая уверенность — не заблокировано.\n`);
         continue;
       }
-      process.stderr.write(`aiguard: обнаружен секрет (${name}) — операция заблокирована.\n`);
+      process.stderr.write(`leakward: обнаружен секрет (${name}) — операция заблокирована.\n`);
       process.exit(2);
     }
   }
 } catch (err) {
-  process.stderr.write(`aiguard: ошибка при проверке на секреты — ${err.message}\nОперация заблокирована.\n`);
+  process.stderr.write(`leakward: ошибка при проверке на секреты — ${err.message}\nОперация заблокирована.\n`);
   process.exit(2);
 }

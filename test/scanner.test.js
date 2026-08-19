@@ -1169,5 +1169,30 @@ test('scan(): broken .aiguardignore glob does not crash and does not skip other 
   assert.strictEqual(findingsFor(findings, 'kept.js').length, 1, 'a broken glob must not abort the scan of other files');
 });
 
+test('scan(): .leakwardignore path is not scanned; deprecated .aiguardignore still works beside it', () => {
+  const dir = makeTempProject();
+  initGitRepo(dir);
+  writeFile(dir, '.leakwardignore', 'new-ignored.js\n');
+  writeFile(dir, '.aiguardignore', 'old-ignored.js\n');
+  writeFile(dir, 'new-ignored.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, 'old-ignored.js', `const key = "${FAKE_SECRET}";\n`);
+  writeFile(dir, 'kept.js', `const key = "${FAKE_SECRET}";\n`);
+  git(dir, ['add', '.leakwardignore', '.aiguardignore', 'new-ignored.js', 'old-ignored.js', 'kept.js']);
+
+  const findings = scanIsolated(dir);
+  assert.strictEqual(findingsFor(findings, 'new-ignored.js').length, 0, '.leakwardignore must skip matching files');
+  assert.strictEqual(findingsFor(findings, 'old-ignored.js').length, 0, '.aiguardignore must remain a working alias');
+  assert.strictEqual(findingsFor(findings, 'kept.js').length, 1, 'unlisted sibling must still be reported');
+});
+
+test('CLI: leakward.js --help and aiguard.js --help both print the leakward banner', () => {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+  for (const bin of ['leakward.js', 'aiguard.js']) {
+    const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'bin', bin), '--help'], { encoding: 'utf8', env });
+    assert.ok(out.includes('leakward'), `${bin} --help must name leakward`);
+    assert.ok(out.includes('aiguard'), `${bin} --help must still mention the aiguard alias`);
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

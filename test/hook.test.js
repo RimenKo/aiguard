@@ -312,6 +312,12 @@ check(
 );
 
 check(
+  'Write: same AWS key with leakward:allow on the same line → allowed',
+  { file_path: 'env.js', content: `key = ${AWS_HOOK_FIXTURE} // leakward:allow` },
+  0,
+);
+
+check(
   'Edit: same AWS key with gitleaks:allow alias → allowed',
   { file_path: 'env.js', old_string: 'placeholder', new_string: `key = ${AWS_HOOK_FIXTURE} // gitleaks:allow` },
   0,
@@ -373,6 +379,32 @@ check(
     `[Write: broken .aiguardignore glob] expected exit 0, got ${r4.status}\nstderr: ${r4.stderr}`
   );
   console.log('✓ Write: broken .aiguardignore glob does not lock the hook');
+  passed++;
+}
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leakward-hook-ignore-'));
+  fs.writeFileSync(path.join(dir, '.leakwardignore'), 'ignored-secret.js\n');
+  const r = runHook(
+    { file_path: 'ignored-secret.js', content: `key = ${AWS_HOOK_FIXTURE}` },
+    { cwd: dir },
+  );
+  assert.strictEqual(
+    r.status, 0,
+    `[Write: path in .leakwardignore] expected exit 0 (file not scanned), got ${r.status}\nstderr: ${r.stderr}`
+  );
+  console.log('✓ Write: file listed in .leakwardignore is not scanned');
+  passed++;
+
+  const r2 = runHook(
+    { file_path: '.leakwardignore', content: `key = ${AWS_HOOK_FIXTURE}` },
+    { cwd: dir },
+  );
+  assert.strictEqual(
+    r2.status, 2,
+    `[Write: .leakwardignore itself] expected exit 2 (ignore file is never skipped), got ${r2.status}\nstderr: ${r2.stderr}`
+  );
+  console.log('✓ Write: .leakwardignore itself is still scanned (never self-ignored)');
   passed++;
 }
 

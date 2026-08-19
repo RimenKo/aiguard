@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { AI_FOLDERS, AI_SECRET_FILES, SECRET_PATTERNS } = require('./patterns');
-const { matchIsAllowed, loadIgnoreRules, isPathIgnored } = require('./allow');
+const { matchIsAllowed, loadIgnoreRules, isPathIgnored, isIgnoreFilename } = require('./allow');
 
 /**
  * Returns list of files that will be included in npm publish.
@@ -431,17 +431,17 @@ function scan(projectRoot, options) {
     publishFiles = publishFiles.filter((f) => wanted.has(f));
   }
 
-  // .aiguardignore at the scan root — gitignore-style path/glob list.
-  // Matching files are dropped from publishFiles so they are not content-
-  // scanned and do not contribute to AI-folder / AI-secret-file findings.
-  // Applied after options.files so an explicit --staged path is still
-  // skippable: the ignore file is a pinpoint "do not scan this" switch,
-  // not something --staged should override.
+  // .leakwardignore / .aiguardignore at the scan root — gitignore-style
+  // path/glob list. Matching files are dropped from publishFiles so they
+  // are not content-scanned and do not contribute to AI-folder / AI-secret-
+  // file findings. Applied after options.files so an explicit --staged path
+  // is still skippable: the ignore file is a pinpoint "do not scan this"
+  // switch, not something --staged should override.
   const ignoreRules = loadIgnoreRules(projectRoot);
   if (ignoreRules.length) {
     publishFiles = publishFiles.filter((f) => {
       const posix = String(f).split(/[\\/]/).join('/');
-      if (posix === '.aiguardignore') return true;
+      if (isIgnoreFilename(posix)) return true;
       return !isPathIgnored(f, ignoreRules);
     });
   }
@@ -907,7 +907,7 @@ function scanGitHistory(projectRoot) {
   }
 
   // Parse into {sha, addedLines} blocks. Track the current diff path from
-  // `+++ b/<file>` so .aiguardignore applies here too — "not scanned at all"
+  // `+++ b/<file>` so .leakwardignore / .aiguardignore apply here too — "not scanned at all"
   // includes history, not just the working-tree pass.
   const ignoreRules = loadIgnoreRules(projectRoot);
   const blocks = [];

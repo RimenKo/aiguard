@@ -460,6 +460,15 @@ test('gitleaks:allow is accepted as an alias of aiguard:allow', () => {
   );
 });
 
+test('leakward:allow is accepted as the public spelling of aiguard:allow', () => {
+  const marked = `const key = "${AWS_ALLOW_FIXTURE}"; // leakward:allow`;
+  assert.strictEqual(
+    scanContent('fixture.js', marked, 'HIGH').filter((f) => f.type === 'secret_pattern').length,
+    0,
+    'leakward:allow on the same line must suppress the finding'
+  );
+});
+
 test('aiguard:allow on a CR-only previous line does not suppress the next line', () => {
   const content = `// aiguard:allow\rconst key = "${AWS_ALLOW_FIXTURE}";`;
   assert.ok(
@@ -484,6 +493,15 @@ test('BIP39 seed on one line with aiguard:allow is still suppressed', () => {
     scanContent('fixture.js', content, 'HIGH').filter((f) => f.type === 'secret_pattern').length,
     0,
     'a marker on the same line as the seed must still suppress it'
+  );
+});
+
+test('BIP39 seed is still flagged when the next line is a bare leakward:allow (greedy overshoot)', () => {
+  const seed = words(12).join(' ');
+  const content = `${seed}\nleakward:allow`;
+  assert.ok(
+    scanContent('fixture.js', content, 'HIGH').some((f) => f.type === 'secret_pattern'),
+    'a marker on the line after a seed must not suppress the seed (greedy {11,} can swallow "leakward")'
   );
 });
 

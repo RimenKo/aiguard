@@ -3,13 +3,14 @@
 const fs = require('fs');
 const path = require('path');
 
-// Same-line suppression, modeled on gitleaks:allow. Either marker works:
-// this repo already has 20+ gitleaks:allow comments on intentional
-// secret-shaped fixtures, and the original false-positive that motivated
-// this feature was aiguard blocking edits of those exact lines. Requiring
-// a new aiguard:allow-only spelling would have left every existing comment
-// still blocking the write hook. \b so "aiguard:allowlist" is not a marker.
-const ALLOW_MARKER_RE = /(?:aiguard|gitleaks):allow\b/;
+// Same-line suppression, modeled on gitleaks:allow. leakward:allow is the
+// public spelling; aiguard:allow and gitleaks:allow stay as aliases so
+// existing comments (this repo has 20+ gitleaks:allow fixtures, plus the
+// aiguard:allow lines that motivated the feature) keep working. Requiring
+// a leakward:allow-only spelling would have left every existing comment
+// still blocking the write hook. \b so "leakward:allowlist" is not a marker.
+const ALLOW_MARKER_RE = /(?:leakward|aiguard|gitleaks):allow\b/;
+const IGNORE_FILENAMES = ['.aiguardignore', '.leakwardignore'];
 
 function lineHasAllowMarker(line) {
   return ALLOW_MARKER_RE.test(line);
@@ -46,8 +47,8 @@ function matchIsAllowed(content, matchIndex, matchLength, validate) {
   if (marked === 0) return false;
   if (unmarked.length === 0) return true;
   // A greedy multiline regex (BIP39 `{11,}`) can swallow the next
-  // 3–8-letter word — including the word "aiguard" on a following
-  // `aiguard:allow` line. If the leftover unmarked text is still a
+  // 3–8-letter word — including "leakward" / "aiguard" on a following
+  // `leakward:allow` / `aiguard:allow` line. If the leftover unmarked text is still a
   // valid secret on its own, the marker was not on the secret: do
   // not suppress. Patterns without validate() stay fail-closed: a
   // leftover unmarked line is reported.
@@ -80,15 +81,25 @@ function parseIgnoreRules(content) {
   return rules;
 }
 
+function isIgnoreFilename(relPath) {
+  const posix = String(relPath || '').split(/[\\/]/).join('/');
+  return IGNORE_FILENAMES.includes(posix);
+}
+
 function loadIgnoreRules(rootDir) {
   if (!rootDir) return [];
-  try {
-    return parseIgnoreRules(fs.readFileSync(path.join(rootDir, '.aiguardignore'), 'utf8'));
-  } catch (_) {
-    // Missing or unreadable: scan everything. Safer than treating a
-    // read error as "ignore the whole tree".
-    return [];
+  // Legacy file first, leakward last so a new .leakwardignore can override
+  // a leftover .aiguardignore via gitignore last-match-wins.
+  const rules = [];
+  for (const name of IGNORE_FILENAMES) {
+    try {
+      rules.push(...parseIgnoreRules(fs.readFileSync(path.join(rootDir, name), 'utf8')));
+    } catch (_) {
+      // Missing or unreadable: skip that file. Safer than treating a
+      // read error as "ignore the whole tree".
+    }
   }
+  return rules;
 }
 
 function globToRegExpSource(glob) {
@@ -158,7 +169,7 @@ function compileRule(pattern) {
     return new RegExp(prefix + body + suffix);
   } catch (_) {
     // A broken character class (e.g. `[]`) must not crash the hook —
-    // that would block every Write, including a fix to .aiguardignore.
+    // that would block every Write, including a fix to the ignore file.
     return null;
   }
 }
@@ -179,7 +190,7 @@ function isPathIgnored(relPath, rules) {
 
 // The write-time hook has no explicit project root — Claude Code launches
 // it with cwd = the project being edited, which is the same "root of the
-// scanned tree" the CLI uses. Only that root's .aiguardignore applies
+// scanned tree" the CLI uses. Only that root's ignore files apply
 // (we do not walk up to $HOME or /): a stray home-directory ignore file
 // must not silently disable the hook for every project.
 function isFileIgnored(filePath, cwd) {
@@ -192,14 +203,16 @@ function isFileIgnored(filePath, cwd) {
   try { abs = fs.realpathSync(abs); } catch (_) { /* new file, not on disk yet */ }
   const rel = path.relative(root, abs);
   if (!rel || rel === '.' || rel.startsWith('..') || path.isAbsolute(rel)) return false;
-  // Always scan .aiguardignore itself for secrets. (A broken glob no
+  // Always scan the ignore files themselves for secrets. (A broken glob no
   // longer locks the hook — compileRule returns null — but a live key
   // pasted into the ignore file must still be blocked.)
-  if (rel.split(/[\\/]/).join('/') === '.aiguardignore') return false;
+  if (isIgnoreFilename(rel)) return false;
   return isPathIgnored(rel, rules);
 }
 
 module.exports = {
+  IGNORE_FILENAMES,
+  isIgnoreFilename,
   lineHasAllowMarker,
   matchIsAllowed,
   parseIgnoreRules,

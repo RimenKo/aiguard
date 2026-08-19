@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node -e \"const p=require('path'),cp=require('child_process'),fs=require('fs');let f;try{f=p.join(p.dirname(require.resolve('@rimenko-dev/aiguard')),'..','claude-hook','aiguard-hook.js')}catch(e){try{const g=cp.execSync('npm root -g 2>/dev/null',{timeout:3000}).toString().trim();f=p.join(g,'@rimenko-dev','aiguard','claude-hook','aiguard-hook.js')}catch(_){process.exit(0)}}if(!fs.existsSync(f)){process.exit(0)}const s=cp.spawnSync(process.execPath,[f],{stdio:'inherit'});process.exit(s.status!=null?s.status:0)\""
+            "command": "node -e \"const p=require('path'),cp=require('child_process'),fs=require('fs');function fromPkg(pkg,file){return p.join(p.dirname(require.resolve(pkg)),'..','claude-hook',file)}let f;for (const [pkg,file] of [['@rimenko-dev/leakward','leakward-hook.js'],['@rimenko-dev/leakward','aiguard-hook.js'],['@rimenko-dev/aiguard','aiguard-hook.js']]){try{const c=fromPkg(pkg,file);if(fs.existsSync(c)){f=c;break}}catch(e){}}if(!f){try{const g=cp.execSync('npm root -g 2>/dev/null',{timeout:3000}).toString().trim();for (const rel of [['leakward','leakward-hook.js'],['leakward','aiguard-hook.js'],['aiguard','aiguard-hook.js']]){const c=p.join(g,'@rimenko-dev',rel[0],'claude-hook',rel[1]);if(fs.existsSync(c)){f=c;break}}}catch(_){}}if(!f||!fs.existsSync(f)){process.exit(0)}const s=cp.spawnSync(process.execPath,[f],{stdio:'inherit'});process.exit(s.status!=null?s.status:0)\""
           }
         ]
       }

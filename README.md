@@ -1,15 +1,17 @@
-# aiguard
+# leakward
 
 **Stop AI coding tools from leaking your secrets.**
 
-Claude Code, Cursor, Copilot, and Windsurf write fast — and regularly sneak API keys, session tokens, and crypto seed phrases into your public repos and npm packages. `aiguard` catches them before `npm publish` or `git push`.
+Claude Code, Cursor, Copilot, and Windsurf write fast — and regularly sneak API keys, session tokens, and crypto seed phrases into your public repos and npm packages. `leakward` catches them before `npm publish` or `git push`.
 
 ```bash
-npm install -g @rimenko-dev/aiguard
-aiguard
+npm install -g @rimenko-dev/leakward
+leakward
 ```
 
-[![npm version](https://badge.fury.io/js/%40rimenko-dev%2Faiguard.svg)](https://www.npmjs.com/package/@rimenko-dev/aiguard)
+`aiguard` is a deprecated alias: `npm i -g @rimenko-dev/aiguard` and the `aiguard` command still work.
+
+[![npm version](https://badge.fury.io/js/%40rimenko-dev%2Fleakward.svg)](https://www.npmjs.com/package/@rimenko-dev/leakward)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
@@ -63,7 +65,7 @@ These folders are **not excluded by default** from `npm publish` or `git push`. 
 `.claude/`, `.cursor/`, `.windsurf/`, and 9 more — if any are included in your npm tarball or git commit, publish is blocked.
 
 ### Known AI context files with secrets
-`CLAUDE.md`, `mcp.json`, `settings.local.json` — scanned and blocked if published. Even when excluded from publish, `aiguard` shows you **which specific secrets** are inside, so you know the blast radius if your ignore config ever breaks.
+`CLAUDE.md`, `mcp.json`, `settings.local.json` — scanned and blocked if published. Even when excluded from publish, `leakward` shows you **which specific secrets** are inside, so you know the blast radius if your ignore config ever breaks.
 
 ### Secrets in published files — 55+ patterns
 
@@ -87,7 +89,7 @@ These folders are **not excluded by default** from `npm publish` or `git push`. 
 Catches secrets that were committed in the past — even if they were deleted later. GitHub caches all commits forever.
 
 ```bash
-aiguard --history
+leakward --history
 ```
 
 ---
@@ -96,16 +98,16 @@ aiguard --history
 
 ```bash
 # Scan current directory (blocks npm publish / git push)
-aiguard
+leakward
 
 # Scan a specific project
-aiguard /path/to/project
+leakward /path/to/project
 
 # Scan git history for past leaks
-aiguard --history
+leakward --history
 
 # Combine both
-aiguard /path/to/project --history
+leakward /path/to/project --history
 ```
 
 **Exit codes:**
@@ -116,16 +118,16 @@ aiguard /path/to/project --history
 
 Intentional secret-shaped fixtures (tests, docs that quote a pattern) can be silenced without turning the detector off.
 
-**Same-line marker** — put `aiguard:allow` on the line that would otherwise match (typically in a comment). `gitleaks:allow` is accepted as an alias, so existing gitleaks comments work as-is. The marker is pinpoint: it does not suppress a match on the next line or in another file.
+**Same-line marker** — put `leakward:allow` on the line that would otherwise match (typically in a comment). `aiguard:allow` and `gitleaks:allow` are accepted as aliases, so existing comments work as-is. The marker is pinpoint: it does not suppress a match on the next line or in another file.
 
 ```js
-const demo = "AKIAABCDEFGHIJKLMNOP"; // aiguard:allow gitleaks:allow — fixture, not a real key
+const demo = "AKIAABCDEFGHIJKLMNOP"; // leakward:allow gitleaks:allow — fixture, not a real key
 ```
 
-**`.aiguardignore`** — a gitignore-style list of paths/globs at the project root. Matching files are not scanned at all (CLI and the Claude Code Write/Edit hook use the same rules).
+**`.leakwardignore`** — a gitignore-style list of paths/globs at the project root. Matching files are not scanned at all (CLI and the Claude Code Write/Edit hook use the same rules). `.aiguardignore` is accepted as a deprecated alias.
 
 ```
-# .aiguardignore
+# .leakwardignore
 test/fixtures/
 docs/examples/*.env
 ```
@@ -133,7 +135,7 @@ docs/examples/*.env
 **Example output:**
 
 ```
-aiguard — AI secret leak scanner
+leakward — AI secret leak scanner
 Project: /my-package
 
 🚨 CRITICAL — publish blocked (1):
@@ -167,7 +169,7 @@ Add to your `package.json` to block every `npm publish` automatically:
 ```json
 {
   "scripts": {
-    "prepublishOnly": "aiguard"
+    "prepublishOnly": "leakward"
   }
 }
 ```
@@ -191,7 +193,7 @@ Add to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$HOME/.claude/bin/aiguard-guard.sh\"",
+            "command": "bash \"$HOME/.claude/bin/leakward-guard.sh\"",
             "timeout": 15
           }
         ]
@@ -201,7 +203,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-Save this as `~/.claude/bin/aiguard-guard.sh` (chmod +x):
+Save this as `~/.claude/bin/leakward-guard.sh` (chmod +x):
 
 ```bash
 #!/bin/bash
@@ -218,11 +220,14 @@ if ! echo "$CMD" | grep -qE '^\s*(git\s+(push|commit|tag)\b|npm\s+publish\b)'; t
     exit 0
 fi
 
-if command -v aiguard &>/dev/null; then
+if command -v leakward &>/dev/null; then
+    leakward "$(pwd)" 2>&1
+    exit $?
+elif command -v aiguard &>/dev/null; then
     aiguard "$(pwd)" 2>&1
     exit $?
 else
-    npx --yes @rimenko-dev/aiguard "$(pwd)" 2>&1
+    npx --yes @rimenko-dev/leakward "$(pwd)" 2>&1
     exit $?
 fi
 ```
@@ -233,11 +238,11 @@ fi
 
 ```bash
 # In your project root:
-echo '#!/bin/sh\naiguard .' > .git/hooks/pre-commit
+echo '#!/bin/sh\nleakward .' > .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 ```
 
-> **Note:** aiguard shells out to `npm pack --dry-run` internally to get npm's
+> **Note:** leakward shells out to `npm pack --dry-run` internally to get npm's
 > exact publish list (secrets in `dist/` or in `README.md`/`package.json`
 > otherwise slip through), which adds roughly 0.3–1.5s per run. That's on
 > every commit if you use it as a pre-commit hook. If that's noticeable on a
@@ -270,7 +275,7 @@ chmod +x .git/hooks/pre-commit
 2. Reports findings before `git push`
 
 **Publish scan vs. real-time write hook:**
-"Reports ALL instances" above describes the `aiguard` CLI (the `npm publish` / `git push` scan) — it always enumerates every match of every secret pattern in a file. The separate real-time hook (`claude-hook/aiguard-hook.js`, triggered by Claude Code on every Write/Edit/MultiEdit/NotebookEdit) works differently: it's built to interrupt the write the instant it confirms a real secret, so it blocks and reports on the **first** HIGH/CRITICAL match it finds and stops there — it does not enumerate every secret that might be in the same write. It does still walk past earlier look-alike matches of the same pattern that fail validation (e.g. a benign word list that isn't a real BIP39 seed) so a genuine secret sitting right after one is never missed — that thoroughness affects what it's able to detect, not how many findings it prints once it decides to block.
+"Reports ALL instances" above describes the `leakward` CLI (the `npm publish` / `git push` scan) — it always enumerates every match of every secret pattern in a file. The separate real-time hook (`claude-hook/leakward-hook.js`, triggered by Claude Code on every Write/Edit/MultiEdit/NotebookEdit) works differently: it's built to interrupt the write the instant it confirms a real secret, so it blocks and reports on the **first** HIGH/CRITICAL match it finds and stops there — it does not enumerate every secret that might be in the same write. It does still walk past earlier look-alike matches of the same pattern that fail validation (e.g. a benign word list that isn't a real BIP39 seed) so a genuine secret sitting right after one is never missed — that thoroughness affects what it's able to detect, not how many findings it prints once it decides to block.
 
 **Crypto mnemonic validation:**
 Candidate phrases are validated against the full official BIP39 wordlist (2048 words). At least 90% of words must be real BIP39 words — ordinary English sentences are not flagged.
@@ -283,7 +288,7 @@ Strings labeled as keys/tokens are decoded from Base64, then the decoded value i
 - Binary files, images, PDFs
 - Files larger than 5 MB (skipped for performance — flagged with a warning, not silently ignored)
 - Non-standard secret formats with no known prefix
-- Lines marked `aiguard:allow` / `gitleaks:allow`, and paths listed in `.aiguardignore`
+- Lines marked `leakward:allow` / `aiguard:allow` / `gitleaks:allow`, and paths listed in `.leakwardignore` / `.aiguardignore`
 
 ---
 
@@ -307,13 +312,20 @@ CLAUDE.md
 ## Install
 
 ```bash
-npm install -g @rimenko-dev/aiguard
+npm install -g @rimenko-dev/leakward
 ```
 
 Or run without installing:
 
 ```bash
-npx @rimenko-dev/aiguard
+npx @rimenko-dev/leakward
+```
+
+The previous package name still installs the same scanner:
+
+```bash
+npm install -g @rimenko-dev/aiguard
+aiguard --help
 ```
 
 ---
@@ -326,4 +338,4 @@ Pull requests welcome. To add new secret patterns, edit `src/patterns.js` — ea
 
 ## License
 
-MIT — [github.com/RimenKo/aiguard](https://github.com/RimenKo/aiguard)
+MIT — [github.com/RimenKo/leakward](https://github.com/RimenKo/leakward)
